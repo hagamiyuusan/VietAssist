@@ -1,0 +1,17 @@
+{
+  "version": 1,
+  "labels": {
+    "person": {
+      "vi": "người"
+    },
+    "chair": {
+      "vi": "ghế"
+    },
+    "bottle": {
+      "vi": "chai"
+    },
+    "cup": {
+      "vi": "cốc"
+    }
+  }
+}
