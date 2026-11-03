@@ -3,9 +3,14 @@ package com.vietassist.app
 import android.content.Context
 import android.graphics.Bitmap
 import android.util.Log
+import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.Deferred
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.asCoroutineDispatcher
 import kotlinx.coroutines.withContext
 import java.util.concurrent.Executors
+import java.util.concurrent.atomic.AtomicLong
 
 /** Hàm native trong libvintern.so (app/src/main/cpp/vintern_jni.cpp). */
 internal object VinternNative {
@@ -66,89 +71,138 @@ object VinternEngine {
     }
     private val dispatcher = executor.asCoroutineDispatcher()
 
-    @Volatile private var nativeReady = false
-    @Volatile private var loaded = false
-    @Volatile private var cancelRequested = false
-
-    /**
-     * Phân tích một khung hình. Hàm sở hữu [bitmap] và giải phóng nó khi xong.
-     * Lần gọi đầu tiên tải mô hình vào bộ nhớ nên chậm hơn vài giây.
-     */
-    suspend fun analyze(context: Context, bitmap: Bitmap, mode: Mode): Result =
-        withContext(dispatcher) {
-            cancelRequested = false
-            try {
-                if (VinternRequirements.read(context).inferenceBlocker != null) {
-                    return@withContext Result.Failed
-                }
-                if (!VinternModelManager.isReady(context)) return@withContext Result.ModelMissing
-                if (!ensureLoaded(context)) return@withContext Result.Failed
-
-                val scaled = scaleToMaxSide(bitmap, mode.maxSide)
-                val rgb = toRgbBytes(scaled)
-                val width = scaled.width
-                val height = scaled.height
-                if (scaled !== bitmap) scaled.recycle()
-
-                val startedAt = System.currentTimeMillis()
-                val output = VinternNative.nativeGenerate(
-                    rgb, width, height, mode.question, mode.maxTokens
-                )
-                Log.i(
-                    TAG,
-                    "Chế độ $mode, ảnh ${width}x$height, " +
-                            "mất ${System.currentTimeMillis() - startedAt} ms"
-                )
-                when {
-                    cancelRequested -> Result.Cancelled
-                    output == null -> Result.Failed
-                    else -> {
-                        val text = cleanForSpeech(output.toString(Charsets.UTF_8))
-                        if (text.isBlank()) Result.Failed else Result.Success(text)
-                    }
-                }
-            } catch (error: Throwable) {
-                Log.e(TAG, "Vintern gặp lỗi khi phân tích ảnh", error)
-                if (loaded) {
-                    VinternNative.nativeUnload()
-                    loaded = false
-                }
-                Result.Failed
-            } finally {
-                if (!bitmap.isRecycled) bitmap.recycle()
-            }
-        }
-
-    /** Dừng câu trả lời đang sinh; phần mã hóa ảnh đang chạy sẽ chạy nốt rồi dừng. */
-    fun cancel() {
-        cancelRequested = true
-        if (nativeReady) VinternNative.nativeCancel()
+    sealed interface PreparationState {
+        data object NotLoaded : PreparationState
+        data object Preparing : PreparationState
+        data object Ready : PreparationState
+        data class Failed(val message: String) : PreparationState
     }
 
-    /** Giải phóng khoảng 1 GB bộ nhớ của mô hình; lần dùng sau sẽ tải lại. */
+    private val mutablePreparationState = MutableStateFlow<PreparationState>(PreparationState.NotLoaded)
+    val preparationState = mutablePreparationState.asStateFlow()
+    @Volatile private var nativeReady = false
+    @Volatile private var activeCancellation: AtomicLong? = null
+
+    /** Tác vụ thuộc tiến trình ứng dụng, không bị hủy khi màn hình đóng/đổi cấu hình. */
+    fun prepare(context: Context, retry: Boolean = false): Deferred<Boolean> {
+        val completion = CompletableDeferred<Boolean>()
+        val appContext = context.applicationContext
+        executor.execute {
+            try {
+                completion.complete(prepareOnWorker(appContext, retry))
+            } catch (error: Throwable) {
+                completion.completeExceptionally(error)
+            }
+        }
+        return completion
+    }
+
+    /** Sở hữu bitmap kể cả khi coroutine bị hủy trước lúc được chạy trên executor. */
+    suspend fun analyze(context: Context, bitmap: Bitmap, mode: Mode, cancellation: AtomicLong): Result {
+        val request = cancellation.get()
+        try {
+            return withContext(dispatcher) {
+                if (request != cancellation.get()) return@withContext Result.Cancelled
+                if (VinternRequirements.read(context).inferenceBlocker != null) return@withContext Result.Failed
+                if (!VinternModelManager.isReady(context)) return@withContext Result.ModelMissing
+                if (!prepareOnWorker(context.applicationContext)) return@withContext Result.Failed
+                if (request != cancellation.get()) return@withContext Result.Cancelled
+
+                try {
+                    val scaled = scaleToMaxSide(bitmap, mode.maxSide)
+                    val width = scaled.width
+                    val height = scaled.height
+                    val rgb = try { toRgbBytes(scaled) } finally {
+                        if (scaled !== bitmap) scaled.recycle()
+                    }
+                    val startedAt = System.currentTimeMillis()
+                    if (request != cancellation.get()) return@withContext Result.Cancelled
+                    activeCancellation = cancellation
+                    val output = try {
+                        VinternNative.nativeGenerate(rgb, width, height, mode.question, mode.maxTokens)
+                    } finally {
+                        activeCancellation = null
+                    }
+                    Log.i(TAG, "Chế độ $mode, ảnh ${width}x$height, mất ${System.currentTimeMillis() - startedAt} ms")
+                    when {
+                        request != cancellation.get() -> Result.Cancelled
+                        output == null -> {
+                            failPreparation("AI gặp lỗi. Hãy thử chuẩn bị AI lại.")
+                            Result.Failed
+                        }
+                        else -> {
+                            val text = cleanForSpeech(output.toString(Charsets.UTF_8))
+                            if (text.isBlank()) Result.Failed else Result.Success(text)
+                        }
+                    }
+                } catch (error: Throwable) {
+                    failPreparation("AI gặp lỗi. Hãy thử chuẩn bị AI lại.", error)
+                    Result.Failed
+                }
+            }
+        } finally {
+            if (!bitmap.isRecycled) bitmap.recycle()
+        }
+    }
+
+    /** Chỉ hủy yêu cầu phân tích; không hủy bước chuẩn bị AI dùng chung cho tiến trình. */
+    fun cancel(cancellation: AtomicLong) {
+        cancellation.incrementAndGet()
+        if (nativeReady && activeCancellation === cancellation) VinternNative.nativeCancel()
+    }
+
+    /** Giải phóng chủ động khi cần; đóng Activity không làm mất model đã chuẩn bị. */
     fun release() {
         executor.execute {
-            if (loaded) {
-                VinternNative.nativeUnload()
-                loaded = false
+            try {
+                if (nativeReady) VinternNative.nativeUnload()
+            } finally {
+                mutablePreparationState.value = PreparationState.NotLoaded
             }
         }
     }
 
-    private fun ensureLoaded(context: Context): Boolean {
-        if (loaded) return true
-        if (!nativeReady) {
-            VinternNative.nativeInit(context.applicationInfo.nativeLibraryDir, context.cacheDir.absolutePath)
-            nativeReady = true
+    // Mọi đường nạp, làm nóng và giải phóng đều chạy trên cùng executor.
+    private fun prepareOnWorker(context: Context, retry: Boolean = false): Boolean {
+        if (preparationState.value == PreparationState.Ready) return true
+        if (preparationState.value is PreparationState.Failed && !retry) return false
+        val blocker = VinternRequirements.read(context).inferenceBlocker
+        if (blocker != null) return failPreparation(blocker)
+        if (!VinternModelManager.isReady(context)) return failPreparation("Chưa tải đủ mô hình AI.")
+        mutablePreparationState.value = PreparationState.Preparing
+        val startedAt = android.os.SystemClock.elapsedRealtime()
+        try {
+            if (!nativeReady) {
+                VinternNative.nativeInit(context.applicationInfo.nativeLibraryDir, context.cacheDir.absolutePath)
+                nativeReady = true
+            }
+            val threads = (Runtime.getRuntime().availableProcessors() / 2).coerceIn(2, 4)
+            check(VinternNative.nativeLoad(
+                VinternModelManager.fileFor(context, VinternModelManager.languageModel).absolutePath,
+                VinternModelManager.fileFor(context, VinternModelManager.visionProjector).absolutePath,
+                threads
+            )) { "native-load-failed" }
+            // Ảnh đen tổng hợp, không dùng camera hay dữ liệu người dùng. Chạy cả
+            // encoder và một token để chuẩn bị kernel trước khi công bố Ready.
+            checkNotNull(VinternNative.nativeGenerate(
+                ByteArray(64 * 64 * 3), 64, 64, Mode.DESCRIBE.question, 1
+            )) { "native-warmup-failed" }
+            mutablePreparationState.value = PreparationState.Ready
+            Log.i(TAG, "Chuẩn bị AI hoàn tất trong ${android.os.SystemClock.elapsedRealtime() - startedAt} ms")
+            return true
+        } catch (error: Throwable) {
+            return failPreparation("Chưa chuẩn bị được AI. Hãy kiểm tra thiết bị rồi thử lại.", error)
         }
-        // Dùng nhóm lõi hiệu năng cao; dùng hết lõi thường chậm hơn trên chip big.LITTLE.
-        val threads = (Runtime.getRuntime().availableProcessors() / 2).coerceIn(2, 4)
-        loaded = VinternNative.nativeLoad(
-            VinternModelManager.fileFor(context, VinternModelManager.languageModel).absolutePath,
-            VinternModelManager.fileFor(context, VinternModelManager.visionProjector).absolutePath,
-            threads
-        )
-        return loaded
+    }
+
+    private fun failPreparation(message: String, error: Throwable? = null): Boolean {
+        if (error != null) Log.e(TAG, "Chuẩn bị AI thất bại: ${error.javaClass.simpleName}")
+        try {
+            if (nativeReady) VinternNative.nativeUnload()
+        } finally {
+            mutablePreparationState.value = PreparationState.Failed(message)
+        }
+        return false
     }
 
     private fun scaleToMaxSide(source: Bitmap, maxSide: Int): Bitmap {

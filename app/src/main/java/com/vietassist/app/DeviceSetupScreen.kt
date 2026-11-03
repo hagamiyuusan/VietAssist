@@ -28,7 +28,8 @@ fun DeviceSetupScreen(
     onDownload: () -> Unit,
     onRefresh: () -> Unit,
     onReadStatus: () -> Unit,
-    onContinue: () -> Unit
+    onContinue: () -> Unit,
+    preparationState: VinternEngine.PreparationState = VinternEngine.PreparationState.NotLoaded
 ) {
     val background = Color(0xFF071D17)
     val accent = Color(0xFFB5F5D2)
@@ -72,9 +73,10 @@ fun DeviceSetupScreen(
             HorizontalDivider(color = accent.copy(alpha = 0.3f))
             SetupRequirement("Mô hình AI · ${VinternModelManager.totalBytes / 1048576} MB", when {
                 downloading -> "Đang tải $progress%. Giữ ứng dụng mở để hoàn tất."
-                modelReady -> "Đã tải đủ hai file model. Hãy thử AI mô tả để kiểm tra thực tế."
+                modelReady -> "Đã tải đủ hai file model. Không cần tải lại."
                 else -> "Chưa sẵn sàng. Nên tải bằng Wi-Fi; có thể tải tiếp nếu bị gián đoạn."
             })
+            if (modelReady) VinternPreparationStatus(preparationState)
             if (downloading) LinearProgressIndicator(progress = { progress / 100f }, modifier = Modifier.fillMaxWidth())
             if (status.isNotBlank()) Text(status, color = accent)
             val blocker = if (modelReady) requirements.inferenceBlocker else requirements.downloadBlocker

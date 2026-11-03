@@ -13,15 +13,21 @@ import androidx.test.core.app.ActivityScenario
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.CoroutineStart
+import kotlinx.coroutines.cancelAndJoin
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.yield
 import kotlinx.coroutines.flow.first
 import org.junit.Assert.*
 import org.junit.Assume.assumeTrue
 import org.junit.Test
 import org.junit.runner.RunWith
 import java.io.IOException
+import java.util.concurrent.atomic.AtomicLong
 
 @RunWith(AndroidJUnit4::class)
 class VinternDeviceTest {
+    private val cancellation = AtomicLong()
     private val context get() = InstrumentationRegistry.getInstrumentation().targetContext
 
     @Test fun lateObserverSeesCompletedDownloadWithoutScreenCallbacks() = runBlocking {
@@ -84,7 +90,7 @@ class VinternDeviceTest {
         assertEquals(filesBefore, VinternModelManager.modelDir(context).listFiles()!!
             .associate { it.name to it.length() })
         val image = Bitmap.createBitmap(16, 16, Bitmap.Config.ARGB_8888)
-        assertSame(VinternEngine.Result.Failed, VinternEngine.analyze(invalid, image, VinternEngine.Mode.DESCRIBE))
+        assertSame(VinternEngine.Result.Failed, VinternEngine.analyze(invalid, image, VinternEngine.Mode.DESCRIBE, cancellation))
         assertTrue(image.isRecycled)
     }
 
@@ -99,9 +105,35 @@ class VinternDeviceTest {
             var progress = 0
             VinternModelManager.download(context) { progress = it }
             assertEquals(100, progress)
+            VinternEngine.release()
+            val preparation = VinternEngine.prepare(context)
+            VinternEngine.preparationState.first { it == VinternEngine.PreparationState.Preparing }
+            val cancelledImage = Bitmap.createBitmap(16, 16, Bitmap.Config.ARGB_8888)
+            val cancelledAnalysis = launch(start = CoroutineStart.UNDISPATCHED) {
+                VinternEngine.analyze(context, cancelledImage, VinternEngine.Mode.DESCRIBE, cancellation)
+            }
+            VinternEngine.cancel(cancellation)
+            cancelledAnalysis.cancel()
+            assertTrue("Screen cancellation must not cancel process preparation", preparation.await())
+            cancelledAnalysis.join()
+            assertTrue("Queued cancelled frame must be recycled", cancelledImage.isRecycled)
+            assertEquals(VinternEngine.PreparationState.Ready, VinternEngine.preparationState.value)
+            var preparingAgain = false
+            val observer = launch(start = CoroutineStart.UNDISPATCHED) {
+                VinternEngine.preparationState.collect {
+                    if (it == VinternEngine.PreparationState.Preparing) preparingAgain = true
+                }
+            }
+            try {
+                assertTrue(VinternEngine.prepare(context).await())
+                yield()
+                assertFalse("A ready model must not load/warm up again", preparingAgain)
+            } finally {
+                observer.cancelAndJoin()
+            }
             repeat(2) {
                 val image = Bitmap.createBitmap(64, 64, Bitmap.Config.ARGB_8888).apply { eraseColor(Color.GREEN) }
-                val result = VinternEngine.analyze(context, image, VinternEngine.Mode.DESCRIBE)
+                val result = VinternEngine.analyze(context, image, VinternEngine.Mode.DESCRIBE, cancellation)
                 assertTrue("Native inference must return non-empty text", result is VinternEngine.Result.Success)
                 assertTrue(VinternNative.nativeBackendName() in setOf("OpenCL", "OpenCL+CPU"))
                 assertTrue(image.isRecycled)
@@ -114,7 +146,7 @@ class VinternDeviceTest {
                 textSize = 230f
                 typeface = Typeface.MONOSPACE
             })
-            val result = VinternEngine.analyze(context, image, VinternEngine.Mode.READ)
+            val result = VinternEngine.analyze(context, image, VinternEngine.Mode.READ, cancellation)
             assertTrue("Native document reading must succeed", result is VinternEngine.Result.Success)
             val syntheticText = (result as VinternEngine.Result.Success).text
             assertEquals("Synthetic digits must be read in order: $syntheticText",
