@@ -10,6 +10,15 @@
 
 Các lệnh “đọc văn bản”, “đọc tài liệu”, “hãy đọc” dùng OCR nhanh. “Đọc chi tiết”, “đọc kỹ” dùng Vintern.
 
+## Điều khiển bằng giọng nói
+
+Trong **Thiết lập → Điều khiển bằng giọng nói**, chọn:
+
+- **Nhấn để nói** (mặc định): nhấn nút trên màn hình chính để mở một phiên nhận lệnh tiếng Việt của Android. Nhận kết quả hoặc hủy thì phiên kết thúc, không tự nghe lại và không chạy service nghe nền. Nếu máy thiếu dịch vụ nhận giọng nói, app báo rõ và các nút chức năng vẫn dùng được.
+- **Luôn nghe**: nghe lệnh tự động khi app ở phía trước và nghe câu gọi khi chạy nền. Cần quyền micro; có thể tốn pin hơn. Khi đổi về Nhấn để nói, app dừng service nghe nền và bỏ callback của phiên nghe cũ.
+
+`VoiceSettings` lưu và cung cấp cùng một lựa chọn cho màn hình, Activity và service. Các lệnh nhận được ở cả hai chế độ đều đi qua cùng hàm xử lý lệnh. Việc nhận dạng giọng nói do dịch vụ Android cung cấp, không phải Vintern; khả năng hoạt động khi không có mạng phụ thuộc dịch vụ trên máy.
+
 ## Tải model và chuẩn bị AI
 
 Tải đủ file chỉ có nghĩa là model đã nằm trên bộ nhớ lưu trữ. Khi mở ứng dụng, engine nạp model vào RAM và chạy một ảnh đen tổng hợp để chuẩn bị các kernel trước khi công bố **AI đã sẵn sàng**. Giao diện hiển thị trạng thái chuẩn bị; OCR nhanh vẫn sử dụng được trong lúc chờ.

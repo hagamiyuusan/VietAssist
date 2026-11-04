@@ -29,6 +29,8 @@ fun DeviceSetupScreen(
     onRefresh: () -> Unit,
     onReadStatus: () -> Unit,
     onContinue: () -> Unit,
+    alwaysListening: Boolean = false,
+    onVoiceModeChange: (Boolean) -> Unit = {},
     preparationState: VinternEngine.PreparationState = VinternEngine.PreparationState.NotLoaded
 ) {
     val background = Color(0xFF071D17)
@@ -63,6 +65,7 @@ fun DeviceSetupScreen(
             HorizontalDivider(color = accent.copy(alpha = 0.3f))
             SetupRequirement("Camera", if (cameraGranted) "Đã cấp quyền." else "Cần để nhận diện và đọc hình ảnh.")
             if (!cameraGranted) SetupButton("Cấp quyền camera", onCamera)
+            VoiceModeSettings(alwaysListening, onVoiceModeChange)
             SetupRequirement("Micro", if (micGranted) "Đã cấp quyền." else "Tùy chọn: cần để điều khiển bằng giọng nói. Vẫn dùng được nút bấm.")
             if (!micGranted) SetupButton("Cấp quyền micro", onMicrophone)
             if (!cameraGranted || !micGranted) {

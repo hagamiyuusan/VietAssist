@@ -53,13 +53,15 @@ class LumoraVoiceService : Service() {
     private var wakeHandled = false
     private var wakeTts: TextToSpeech? = null
     private var wakeLaunchStarted = false
+    private var destroyed = false
+    private var recognitionGeneration = 0L
 
     private val launchAfterWakeTask = Runnable { launchActivityAfterWake() }
     private val restartTask = Runnable { startRecognitionSession() }
     // Nếu Android âm thầm chặn việc mở Activity, tiếp tục chờ câu gọi sau vài giây.
     // Khi Activity thực sự mở, ACTION_INIT sẽ hủy tác vụ này.
     private val wakeFallbackTask = Runnable {
-        if (!backgroundListening && hasMicrophonePermission()) {
+        if (!backgroundListening && voiceEnabled()) {
             backgroundListening = true
             wakeHandled = false
             updateNotification("LUMORA vẫn đang chờ câu gọi; chạm thông báo nếu cần mở ứng dụng")
@@ -75,8 +77,8 @@ class LumoraVoiceService : Service() {
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         val action = intent?.action ?: ACTION_INIT
 
-        if (!hasMicrophonePermission()) {
-            Log.w(TAG, "Thiếu quyền micro; dừng dịch vụ nghe nền")
+        if (!voiceEnabled()) {
+            Log.w(TAG, "Luôn nghe đã tắt hoặc thiếu quyền micro; dừng dịch vụ nghe nền")
             stopBackgroundRecognition()
             stopSelf()
             return START_NOT_STICKY
@@ -108,6 +110,9 @@ class LumoraVoiceService : Service() {
         }
         return START_STICKY
     }
+
+    private fun voiceEnabled(): Boolean =
+        !destroyed && automaticListeningAllowed(VoiceSettings.get(this).alwaysListening.value, hasMicrophonePermission())
 
     private fun hasMicrophonePermission(): Boolean =
         ContextCompat.checkSelfPermission(this, android.Manifest.permission.RECORD_AUDIO) ==
@@ -174,7 +179,7 @@ class LumoraVoiceService : Service() {
 
     private fun startRecognitionSession() {
         handler.removeCallbacks(restartTask)
-        if (!backgroundListening || wakeHandled || !hasMicrophonePermission()) return
+        if (!backgroundListening || wakeHandled || !voiceEnabled()) return
         if (!SpeechRecognizer.isRecognitionAvailable(this)) {
             Log.w(TAG, "SpeechRecognizer không khả dụng trên thiết bị")
             updateNotification("Không thể nghe nền trên thiết bị này; chạm để mở LUMORA")
@@ -184,6 +189,7 @@ class LumoraVoiceService : Service() {
 
         try {
             if (recognizer == null) {
+                val generation = recognitionGeneration
                 recognizer = SpeechRecognizer.createSpeechRecognizer(this).also { speechRecognizer ->
                     speechRecognizer.setRecognitionListener(object : RecognitionListener {
                         override fun onReadyForSpeech(params: Bundle?) = Unit
@@ -192,7 +198,7 @@ class LumoraVoiceService : Service() {
                         override fun onBufferReceived(buffer: ByteArray?) = Unit
                         override fun onEndOfSpeech() = Unit
                         override fun onPartialResults(partialResults: Bundle?) {
-                            if (!backgroundListening || wakeHandled) return
+                            if (generation != recognitionGeneration || !backgroundListening || wakeHandled || !voiceEnabled()) return
                             val partials = partialResults?.getStringArrayList(
                                 SpeechRecognizer.RESULTS_RECOGNITION
                             )
@@ -204,10 +210,8 @@ class LumoraVoiceService : Service() {
                         override fun onEvent(eventType: Int, params: Bundle?) = Unit
 
                         override fun onResults(results: Bundle?) {
-                            if (!backgroundListening || wakeHandled) return
+                            if (generation != recognitionGeneration || !backgroundListening || wakeHandled || !voiceEnabled()) return
                             val matches = results?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
-                            val phrase = matches?.joinToString(" | ").orEmpty()
-                            Log.d(TAG, "Các kết quả nghe nền: $phrase")
                             if (matches.orEmpty().any { isWakePhrase(it) }) {
                                 handleWakePhrase()
                             } else {
@@ -216,7 +220,7 @@ class LumoraVoiceService : Service() {
                         }
 
                         override fun onError(error: Int) {
-                            if (!backgroundListening || wakeHandled) return
+                            if (generation != recognitionGeneration || !backgroundListening || wakeHandled || !voiceEnabled()) return
                             if (error == SpeechRecognizer.ERROR_INSUFFICIENT_PERMISSIONS) {
                                 updateNotification("Micro chưa được cấp quyền; chạm để mở LUMORA")
                                 return
@@ -262,7 +266,7 @@ class LumoraVoiceService : Service() {
     }
 
     private fun handleWakePhrase() {
-        if (wakeHandled) return
+        if (wakeHandled || !voiceEnabled()) return
         wakeHandled = true
         backgroundListening = false
         stopBackgroundRecognition()
@@ -276,10 +280,12 @@ class LumoraVoiceService : Service() {
         // Android/Samsung vẫn có thể chặn Activity launch khi ứng dụng ở nền.
         launchActivityAfterWake()
 
+        val generation = recognitionGeneration
         try {
             wakeTts?.stop()
             wakeTts?.shutdown()
             wakeTts = TextToSpeech(applicationContext) { status ->
+                if (generation != recognitionGeneration || !voiceEnabled()) return@TextToSpeech
                 val engine = wakeTts
                 if (status == TextToSpeech.SUCCESS && engine != null) {
                     try {
@@ -314,7 +320,7 @@ class LumoraVoiceService : Service() {
     }
 
     private fun launchActivityAfterWake() {
-        if (wakeLaunchStarted) return
+        if (wakeLaunchStarted || !voiceEnabled()) return
         wakeLaunchStarted = true
         handler.removeCallbacks(launchAfterWakeTask)
         try {
@@ -335,6 +341,7 @@ class LumoraVoiceService : Service() {
     }
 
     private fun stopBackgroundRecognition() {
+        recognitionGeneration++
         handler.removeCallbacks(restartTask)
         try {
             recognizer?.cancel()
@@ -352,6 +359,7 @@ class LumoraVoiceService : Service() {
     }
 
     override fun onDestroy() {
+        destroyed = true
         backgroundListening = false
         stopBackgroundRecognition()
         handler.removeCallbacksAndMessages(null)

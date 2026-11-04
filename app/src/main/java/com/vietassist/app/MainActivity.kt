@@ -116,26 +116,26 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    override fun onStart() {
-        super.onStart()
-        // Dịch vụ được khởi động khi Activity đang hiển thị, đáp ứng hạn chế
-        // Android đối với foreground service sử dụng micro.
-        if (ContextCompat.checkSelfPermission(
-                this,
-                Manifest.permission.RECORD_AUDIO
-            ) == PackageManager.PERMISSION_GRANTED
+    fun syncVoiceService() {
+        if (automaticListeningAllowed(VoiceSettings.get(this).alwaysListening.value,
+                ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED)
         ) {
             startLumoraVoiceService(LumoraVoiceService.ACTION_INIT, foregroundStart = true)
+        } else {
+            stopService(Intent(this, LumoraVoiceService::class.java))
         }
+    }
+
+    override fun onStart() {
+        super.onStart()
+        syncVoiceService()
     }
 
     override fun onStop() {
         // VoiceCommandListener sẽ tự dừng ở ON_PAUSE. Chỉ sau khi Activity rời
         // màn hình, dịch vụ mới được phép nghe cụm đánh thức trong nền.
-        if (ContextCompat.checkSelfPermission(
-                this,
-                Manifest.permission.RECORD_AUDIO
-            ) == PackageManager.PERMISSION_GRANTED
+        if (automaticListeningAllowed(VoiceSettings.get(this).alwaysListening.value,
+                ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED)
         ) {
             startLumoraVoiceService(LumoraVoiceService.ACTION_LISTEN_BACKGROUND)
         }
@@ -160,6 +160,17 @@ class MainActivity : ComponentActivity() {
 fun VietAssistScreen() {
     val context = LocalContext.current
     val hostActivity = context as? MainActivity
+    val voiceSettings = remember(context) { VoiceSettings.get(context) }
+    val alwaysListening by voiceSettings.alwaysListening.collectAsState()
+    var manualVoicePending by rememberSaveable { mutableStateOf(false) }
+    var manualCommand by remember { mutableStateOf<String?>(null) }
+    val manualVoiceLauncher = rememberLauncherForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
+        val accept = manualVoicePending && !voiceSettings.alwaysListening.value
+        manualVoicePending = false
+        if (accept && result.resultCode == android.app.Activity.RESULT_OK) {
+            manualCommand = result.data?.getStringArrayListExtra(RecognizerIntent.EXTRA_RESULTS)?.firstOrNull()
+        }
+    }
     var handledWakeRequest by remember { mutableIntStateOf(0) }
     // Lưu trạng thái hướng dẫn để không đọc lại mỗi lần mở ứng dụng.
     val onboardingPrefs = remember(context) {
@@ -501,8 +512,8 @@ fun VietAssistScreen() {
             val result = speakMessage(
                 "Xin chào. Tôi là trợ lý thị giác của bạn, hỗ trợ nhận biết một số vật thể xung quanh " +
                         "và đọc chữ trên sách, tài liệu, nhãn sản phẩm. " +
-                        "Để điều khiển bằng giọng nói, ứng dụng cần quyền sử dụng micro. " +
-                        "Sau lời chào, điện thoại sẽ hỏi bạn có cho phép hay không.",
+                        (if (alwaysListening) "Để luôn nghe lệnh, ứng dụng cần quyền sử dụng micro. Sau lời chào, điện thoại sẽ hỏi quyền micro."
+                        else "Bạn có thể nhấn nút Nhấn để nói để ra lệnh, hoặc dùng các nút chức năng trên màn hình."),
                 TextToSpeech.QUEUE_FLUSH,
                 null,
                 "lumora_onboarding_welcome"
@@ -640,24 +651,33 @@ fun VietAssistScreen() {
             if (!showDeviceSetup && !onboardingAlreadyCompleted) startOnboardingInstructions()
         }
 
+    fun startManualVoice() {
+        ttsEngine?.stop()
+        manualVoicePending = true
+        try {
+            manualVoiceLauncher.launch(Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
+                putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
+                putExtra(RecognizerIntent.EXTRA_LANGUAGE, "vi-VN")
+                putExtra(RecognizerIntent.EXTRA_PROMPT, "Nói lệnh, ví dụ: đọc văn bản hoặc mô tả xung quanh")
+            })
+        } catch (_: android.content.ActivityNotFoundException) {
+            manualVoicePending = false
+            speakMessage("Máy chưa có dịch vụ nhận giọng nói. Bạn vẫn dùng được các nút chức năng.",
+                TextToSpeech.QUEUE_FLUSH, null, "lumora_voice_unavailable")
+        }
+    }
+
     val micPermissionLauncher =
         rememberLauncherForActivityResult(
             ActivityResultContracts.RequestPermission()
         ) { granted ->
             micPermissionGranted = granted
+            if (!granted) manualVoicePending = false
             if (granted) {
-                // Khởi động foreground service ngay khi người dùng cấp micro,
-                // khi Activity vẫn đang hiển thị; không đợi tới lúc ra nền.
-                try {
-                    ContextCompat.startForegroundService(
-                        context,
-                        Intent(context, LumoraVoiceService::class.java)
-                            .setAction(LumoraVoiceService.ACTION_INIT)
-                    )
-                } catch (error: Exception) {
-                    Log.e("LUMORA_BG_VOICE", "Không thể khởi động nghe nền", error)
-                }
-                if (!showDeviceSetup && Build.VERSION.SDK_INT >= 33 &&
+                hostActivity?.syncVoiceService()
+                if (manualVoicePending && !alwaysListening) {
+                    startManualVoice()
+                } else if (!showDeviceSetup && Build.VERSION.SDK_INT >= 33 &&
                     ContextCompat.checkSelfPermission(
                         context,
                         Manifest.permission.POST_NOTIFICATIONS
@@ -691,10 +711,10 @@ fun VietAssistScreen() {
             }
         }
 
-    LaunchedEffect(micPermissionRequestPending, micPermissionGranted) {
+    LaunchedEffect(micPermissionRequestPending, micPermissionGranted, alwaysListening) {
         if (micPermissionRequestPending) {
             micPermissionRequestPending = false
-            if (micPermissionGranted) {
+            if (!alwaysListening || micPermissionGranted) {
                 if (!showDeviceSetup && !onboardingAlreadyCompleted) startOnboardingInstructions()
             } else {
                 micPermissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
@@ -994,12 +1014,7 @@ fun VietAssistScreen() {
         }
     }
 
-    VoiceCommandListener(
-        enabled = !showDeviceSetup && micPermissionGranted &&
-                ((!onboardingStarted && !ttsReady) ||
-                        (onboardingStarted && !onboardingSpeaking)),
-        ignoreCommandsWhileSpeaking = ignoreVoiceEcho
-    ) { spoken ->
+    fun handleVoiceCommand(spoken: String) {
         val command = spoken.lowercase(Locale.forLanguageTag("vi-VN"))
             .replace(Regex("[^\\p{L}\\p{N}\\s]"), " ")
             .replace(Regex("\\s+"), " ")
@@ -1179,12 +1194,31 @@ fun VietAssistScreen() {
         }
     }
 
+    VoiceCommandListener(
+        enabled = automaticListeningAllowed(alwaysListening, micPermissionGranted) && !showDeviceSetup &&
+            ((!onboardingStarted && !ttsReady) || (onboardingStarted && !onboardingSpeaking)),
+        ignoreCommandsWhileSpeaking = ignoreVoiceEcho,
+        onCommand = ::handleVoiceCommand
+    )
+    LaunchedEffect(manualCommand) {
+        val spoken = manualCommand ?: return@LaunchedEffect
+        manualCommand = null
+        if (!alwaysListening && !showDeviceSetup) handleVoiceCommand(spoken)
+    }
+
     if (showDeviceSetup) {
         DeviceSetupScreen(
             requirements = deviceRequirements,
             cameraGranted = hasPermission, micGranted = micPermissionGranted,
             modelReady = modelReady, downloading = modelDownloading,
             preparationState = preparationState,
+            alwaysListening = alwaysListening,
+            onVoiceModeChange = { enabled ->
+                manualVoicePending = false
+                voiceSettings.setAlwaysListening(enabled)
+                hostActivity?.syncVoiceService()
+                if (enabled && !micPermissionGranted) micPermissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
+            },
             progress = modelDownloadPercent, status = vinternStatus,
             onCamera = { permissionLauncher.launch(Manifest.permission.CAMERA) },
             onMicrophone = { micPermissionLauncher.launch(Manifest.permission.RECORD_AUDIO) },
@@ -1288,7 +1322,25 @@ fun VietAssistScreen() {
                 onClick = { showDeviceSetup = true },
                 enabled = !vinternBusy,
                 modifier = Modifier.heightIn(min = 48.dp)
-            ) { Text("THIẾT LẬP THIẾT BỊ VÀ AI", color = accentGreen) }
+            ) { Text("THIẾT LẬP", color = accentGreen) }
+
+            if (!alwaysListening) {
+                Button(
+                    onClick = {
+                        if (!micPermissionGranted) {
+                            manualVoicePending = true
+                            micPermissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
+                        } else {
+                            startManualVoice()
+                        }
+                    },
+                    enabled = !manualVoicePending,
+                    modifier = Modifier.fillMaxWidth().heightIn(min = 56.dp),
+                    colors = ButtonDefaults.buttonColors(containerColor = accentGreen, contentColor = deepGreen)
+                ) { Text("Nhấn để nói") }
+            } else {
+                Text("Luôn nghe đang bật · đổi trong Thiết lập", color = accentGreen)
+            }
 
             // CAMERA
             Surface(
@@ -1576,9 +1628,14 @@ fun VoiceCommandListener(
             // Ghi nhớ trạng thái tại lúc bắt đầu một phiên nghe. Nếu phiên đó bắt
             // đầu khi TTS đang nói, bỏ kết quả phiên đó để tránh nhận nhầm tiếng vọng
             // ngay cả khi TTS đã kết thúc trước lúc callback onResults đến.
+            var disposed = false
+            fun sessionActive() = !disposed &&
+                lifecycleOwner.lifecycle.currentState.isAtLeast(Lifecycle.State.RESUMED) &&
+                VoiceSettings.get(context).alwaysListening.value
             var sessionStartedDuringSpeech = false
             val restartListening = object : Runnable {
                 override fun run() {
+                    if (!sessionActive()) return
                     try {
                         sessionStartedDuringSpeech = latestIgnoreCommandsWhileSpeaking
                         recognizer.startListening(intent)
@@ -1598,6 +1655,7 @@ fun VoiceCommandListener(
                 override fun onEvent(eventType: Int, params: Bundle?) = Unit
 
                 override fun onResults(results: Bundle?) {
+                    if (!sessionActive()) return
                     val matches = results?.getStringArrayList(
                         SpeechRecognizer.RESULTS_RECOGNITION
                     )
@@ -1624,6 +1682,7 @@ fun VoiceCommandListener(
                 }
 
                 override fun onError(error: Int) {
+                    if (!sessionActive()) return
                     handler.removeCallbacks(restartListening)
                     if (error != SpeechRecognizer.ERROR_INSUFFICIENT_PERMISSIONS) {
                         handler.postDelayed(
@@ -1639,6 +1698,7 @@ fun VoiceCommandListener(
             handler.post(restartListening)
 
             onDispose {
+                disposed = true
                 handler.removeCallbacks(restartListening)
                 recognizer.cancel()
                 recognizer.destroy()
