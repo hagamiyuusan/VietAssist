@@ -14,7 +14,7 @@ Các lệnh “đọc văn bản”, “đọc tài liệu”, “hãy đọc”
 
 Trong **Thiết lập → Điều khiển bằng giọng nói**, chọn:
 
-- **Nhấn để nói** (mặc định): nhấn nút trên màn hình chính để mở một phiên nhận lệnh tiếng Việt của Android. Nhận kết quả hoặc hủy thì phiên kết thúc, không tự nghe lại và không chạy service nghe nền. Nếu máy thiếu dịch vụ nhận giọng nói, app báo rõ và các nút chức năng vẫn dùng được.
+- **Nhấn để nói** (mặc định): nhấn nút trên màn hình chính để mở một phiên nhận lệnh tiếng Việt ngay trong app bằng `SpeechRecognizer` của Android. Nhận kết quả hoặc hủy thì phiên kết thúc, không tự nghe lại và không chạy service nghe nền. Nút đổi thành “Đang nghe… Nhấn để dừng” trong phiên; có thể bấm để hủy. Nếu máy thiếu dịch vụ nhận giọng nói, app báo rõ và các nút chức năng vẫn dùng được.
 - **Luôn nghe**: nghe lệnh tự động khi app ở phía trước và nghe câu gọi khi chạy nền. Cần quyền micro; có thể tốn pin hơn. Khi đổi về Nhấn để nói, app dừng service nghe nền và bỏ callback của phiên nghe cũ.
 
 `VoiceSettings` lưu và cung cấp cùng một lựa chọn cho màn hình, Activity và service. Các lệnh nhận được ở cả hai chế độ đều đi qua cùng hàm xử lý lệnh. Việc nhận dạng giọng nói do dịch vụ Android cung cấp, không phải Vintern; khả năng hoạt động khi không có mạng phụ thuộc dịch vụ trên máy.
