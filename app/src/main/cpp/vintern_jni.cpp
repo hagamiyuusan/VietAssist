@@ -6,6 +6,7 @@
 #include <android/log.h>
 
 #include <atomic>
+#include <chrono>
 #include <cstring>
 #include <exception>
 #include <memory>
@@ -195,6 +196,44 @@ extern "C" JNIEXPORT jstring JNICALL
 Java_com_vietassist_app_VinternNative_nativeBackendName(JNIEnv * env, jobject) {
     std::lock_guard<std::mutex> lock(g_mutex);
     return env->NewStringUTF(g_backend_name.c_str());
+}
+
+// Làm nóng từng backend mà không đưa 256 token ảnh và câu hỏi giả qua LLM.
+extern "C" JNIEXPORT jboolean JNICALL
+Java_com_vietassist_app_VinternNative_nativeWarmup(JNIEnv *, jobject) {
+    std::lock_guard<std::mutex> lock(g_mutex);
+    if (!g_model || !g_lctx || !g_mctx) return JNI_FALSE;
+    const auto started = std::chrono::steady_clock::now();
+    try {
+        std::vector<unsigned char> pixels(64 * 64 * 3, 0);
+        auto bitmap = std::unique_ptr<mtmd_bitmap, decltype(&mtmd_bitmap_free)>(
+                mtmd_bitmap_init(64, 64, pixels.data()), mtmd_bitmap_free);
+        const std::string marker = mtmd_default_marker();
+        mtmd_input_text text{marker.c_str(), marker.size(), true, true};
+        auto chunks = std::unique_ptr<mtmd_input_chunks, decltype(&mtmd_input_chunks_free)>(
+                mtmd_input_chunks_init(), mtmd_input_chunks_free);
+        const mtmd_bitmap * bitmaps[] = { bitmap.get() };
+        if (mtmd_tokenize(g_mctx, chunks.get(), &text, bitmaps, 1) != 0) return JNI_FALSE;
+        bool encoded = false;
+        for (size_t i = 0; i < mtmd_input_chunks_size(chunks.get()); ++i) {
+            const auto * chunk = mtmd_input_chunks_get(chunks.get(), i);
+            if (mtmd_input_chunk_get_type(chunk) != MTMD_INPUT_CHUNK_TYPE_IMAGE) continue;
+            if (mtmd_encode_chunk(g_mctx, chunk) != 0) return JNI_FALSE;
+            encoded = true;
+        }
+        if (!encoded || g_im_end == LLAMA_TOKEN_NULL) return JNI_FALSE;
+        llama_memory_clear(llama_get_memory(g_lctx), true);
+        llama_token token = g_im_end;
+        auto batch = llama_batch_get_one(&token, 1);
+        const int result = llama_decode(g_lctx, batch);
+        llama_memory_clear(llama_get_memory(g_lctx), true);
+        LOGI("Làm nóng encoder và LLM: %lld ms", static_cast<long long>(
+                std::chrono::duration_cast<std::chrono::milliseconds>(
+                        std::chrono::steady_clock::now() - started).count()));
+        return result == 0 ? JNI_TRUE : JNI_FALSE;
+    } catch (const std::exception &) {
+        return JNI_FALSE;
+    }
 }
 
 // Trả về văn bản UTF-8 dạng byte[] (Kotlin tự giải mã) để không lỗi khi

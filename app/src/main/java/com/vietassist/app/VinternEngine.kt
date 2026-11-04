@@ -21,6 +21,7 @@ internal object VinternNative {
     external fun nativeInit(nativeLibDir: String, cacheDir: String)
     external fun nativeLoad(modelPath: String, mmprojPath: String, nThreads: Int): Boolean
     external fun nativeBackendName(): String
+    external fun nativeWarmup(): Boolean
     external fun nativeGenerate(
         rgb: ByteArray,
         width: Int,
@@ -182,11 +183,10 @@ object VinternEngine {
                 VinternModelManager.fileFor(context, VinternModelManager.visionProjector).absolutePath,
                 threads
             )) { "native-load-failed" }
-            // Ảnh đen tổng hợp, không dùng camera hay dữ liệu người dùng. Chạy cả
-            // encoder và một token để chuẩn bị kernel trước khi công bố Ready.
-            checkNotNull(VinternNative.nativeGenerate(
-                ByteArray(64 * 64 * 3), 64, 64, Mode.DESCRIBE.question, 1
-            )) { "native-warmup-failed" }
+            Log.i(TAG, "Nạp model hoàn tất trong ${android.os.SystemClock.elapsedRealtime() - startedAt} ms")
+            // Chuẩn bị encoder và một bước ngôn ngữ, không chạy lại toàn bộ
+            // prefill ảnh/câu hỏi của một lượt phân tích bỏ đi.
+            check(VinternNative.nativeWarmup()) { "native-warmup-failed" }
             mutablePreparationState.value = PreparationState.Ready
             Log.i(TAG, "Chuẩn bị AI hoàn tất trong ${android.os.SystemClock.elapsedRealtime() - startedAt} ms")
             return true
