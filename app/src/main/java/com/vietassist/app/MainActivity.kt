@@ -29,6 +29,8 @@ import androidx.compose.runtime.*
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.liveRegion
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -126,6 +128,16 @@ fun VietAssistScreen() {
     val alwaysListening by voiceSettings.alwaysListening.collectAsState()
     var manualVoicePending by rememberSaveable { mutableStateOf(false) }
     var voiceStatus by remember { mutableStateOf("") }
+    var voiceNoticeId by remember { mutableIntStateOf(0) }
+    var voiceListening by remember { mutableStateOf(false) }
+    fun showVoiceNotice(message: String) { voiceStatus = message; voiceNoticeId++ }
+    LaunchedEffect(voiceNoticeId) {
+        val request = voiceNoticeId
+        if (request > 0) {
+            kotlinx.coroutines.delay(6000)
+            if (voiceNoticeId == request) voiceStatus = ""
+        }
+    }
     var handledWakeRequest by remember { mutableIntStateOf(0) }
     // Lưu trạng thái hướng dẫn để không đọc lại mỗi lần mở ứng dụng.
     val onboardingPrefs = remember(context) {
@@ -143,69 +155,10 @@ fun VietAssistScreen() {
         mutableStateOf<TextToSpeech?>(null)
     }
 
+    var appSpeech by remember { mutableStateOf("") }
+    var ttsStatus by remember { mutableStateOf("Đang chuẩn bị giọng Việt…") }
     var ttsReady by remember {
         mutableStateOf(false)
-    }
-
-    DisposableEffect(context) {
-        var engine: TextToSpeech? = null
-
-        engine = TextToSpeech(context) { status ->
-            val currentEngine = engine
-
-            if (status == TextToSpeech.SUCCESS && currentEngine != null) {
-                val vietnameseLocale = Locale.forLanguageTag("vi-VN")
-
-                val languageStatus =
-                    currentEngine.setLanguage(vietnameseLocale)
-
-                currentEngine.setSpeechRate(0.9f)
-                currentEngine.setPitch(1.0f)
-
-                val currentVoice = currentEngine.voice
-
-                Log.d(
-                    "LUMORA_TTS",
-                    "Language status: $languageStatus"
-                )
-
-                Log.d(
-                    "LUMORA_TTS",
-                    "Voice name: ${currentVoice?.name}"
-                )
-
-                Log.d(
-                    "LUMORA_TTS",
-                    "Voice locale: ${currentVoice?.locale}"
-                )
-
-                ttsReady =
-                    languageStatus != TextToSpeech.LANG_MISSING_DATA &&
-                            languageStatus != TextToSpeech.LANG_NOT_SUPPORTED
-
-                if (!ttsReady) {
-                    Log.e(
-                        "LUMORA_TTS",
-                        "Chưa hỗ trợ tiếng Việt. Mã ngôn ngữ: $languageStatus"
-                    )
-                }
-            } else {
-                ttsReady = false
-                Log.e(
-                    "LUMORA_TTS",
-                    "Khởi tạo TextToSpeech thất bại: $status"
-                )
-            }
-        }
-
-        ttsEngine = engine
-
-        onDispose {
-            engine?.stop()
-            engine?.shutdown()
-            ttsEngine = null
-            ttsReady = false
-        }
     }
 
     var detectionEnabled by remember {
@@ -280,6 +233,55 @@ fun VietAssistScreen() {
     var ignoreVoiceEcho by remember { mutableStateOf(false) }
     var speechCompletionTick by remember { mutableStateOf(0) }
 
+    var ttsReload by remember { mutableIntStateOf(0) }
+    val speechLifecycle = LocalLifecycleOwner.current
+    DisposableEffect(speechLifecycle) {
+        var paused = false
+        val observer = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_PAUSE) paused = true
+            if (event == Lifecycle.Event.ON_RESUME && paused) { paused = false; ttsReload++ }
+        }
+        speechLifecycle.lifecycle.addObserver(observer)
+        onDispose { speechLifecycle.lifecycle.removeObserver(observer) }
+    }
+    DisposableEffect(context, ttsReload) {
+        var engine: TextToSpeech? = null
+        var disposed = false
+        engine = TextToSpeech(context) { status ->
+            if (disposed) return@TextToSpeech
+            val currentEngine = engine
+
+            if (status == TextToSpeech.SUCCESS && currentEngine != null) {
+                ttsReady = VietnameseSpeech.configure(currentEngine)
+                val label = currentEngine.engines.firstOrNull { it.name == currentEngine.defaultEngine }?.label ?: "Bộ đọc của máy"
+                ttsStatus = if (ttsReady) "Giọng Việt đã sẵn sàng · $label"
+                    else "Chưa có giọng Việt sẵn sàng. Mở cài đặt giọng đọc để tải hoặc chọn bộ đọc hỗ trợ tiếng Việt."
+                Log.i("LUMORA_TTS", "engine=${currentEngine.defaultEngine}, locale=${currentEngine.voice?.locale?.toLanguageTag()}, ready=$ttsReady")
+            } else {
+                ttsReady = false
+                ttsStatus = "Không khởi tạo được giọng đọc. Hãy kiểm tra cài đặt giọng nói."
+                Log.e(
+                    "LUMORA_TTS",
+                    "Khởi tạo TextToSpeech thất bại: $status"
+                )
+            }
+        }
+
+        ttsEngine = engine
+
+        onDispose {
+            disposed = true
+            activeUtteranceId = null
+            appSpeech = ""
+            ttsSpeaking = false
+            ignoreVoiceEcho = false
+            engine?.stop()
+            engine?.shutdown()
+            ttsEngine = null
+            ttsReady = false
+        }
+    }
+
     fun speakMessage(
         text: String,
         queueMode: Int,
@@ -287,9 +289,11 @@ fun VietAssistScreen() {
         utteranceId: String
     ): Int {
         val engine = ttsEngine ?: return TextToSpeech.ERROR
+        if (!ttsReady) return TextToSpeech.ERROR
         // ID duy nhất, kể cả khi cùng một lệnh được phát nhiều lần.
         val uniqueUtteranceId = "${utteranceId}__run_${System.nanoTime()}"
         activeUtteranceId = uniqueUtteranceId
+        appSpeech = text
         ttsSpeaking = true
         ignoreVoiceEcho = true
 
@@ -380,6 +384,7 @@ fun VietAssistScreen() {
 
                         activeUtteranceId = null
                         ttsSpeaking = false
+                        if (failed) showVoiceNotice("Không phát được giọng đọc. Mở Thiết lập để kiểm tra giọng Việt.")
                         speechCompletionTick++
                         ignoreVoiceEcho = true
                         Handler(Looper.getMainLooper()).postDelayed({
@@ -938,125 +943,104 @@ fun VietAssistScreen() {
                     }
                 }
             }
-        } else when {
-            command.contains("hướng dẫn sử dụng") ||
-                    command.contains("hướng dẫn lại") ||
-                    command == "hướng dẫn" -> {
-                startOnboardingInstructions()
-            }
-
-            // Lệnh dùng Vintern đặt trước nhánh "đọc văn bản", vì "hãy đọc kỹ"
-            // cũng chứa cụm "hãy đọc".
-            command.contains("tải mô hình") -> startModelDownload()
-
-            command.contains("mô tả") ||
-                    command.contains("xung quanh có gì") ||
-                    command.contains("trước mặt có gì") -> {
-                requestCapture(VinternEngine.Mode.DESCRIBE)
-            }
-
-            command.contains("đọc chi tiết") ||
-                    command.contains("đọc kỹ") -> {
-                requestCapture(VinternEngine.Mode.READ)
-            }
-
-            command.contains("đọc văn bản") ||
-                    command.contains("đọc tài liệu") ||
-                    command.contains("hãy đọc") -> {
-
-                requestCapture(VinternEngine.Mode.READ)
-            }
-
-            command == "dừng đọc" ||
-                    command == "ngừng đọc" ||
-                    command == "dừng đọc văn bản" -> {
-                stopVintern()
-                ttsEngine?.stop()
-                activeUtteranceId = null
-                ttsSpeaking = false
-                ignoreVoiceEcho = true
-                Handler(Looper.getMainLooper()).postDelayed({
-                    if (!ttsSpeaking && activeUtteranceId == null) ignoreVoiceEcho = false
-                }, 650L)
-                speechCompletionTick++
-                speakMessage(
-                    "Đã dừng đọc. Bạn có thể nói đọc lại hoặc nhận diện lại.",
-                    TextToSpeech.QUEUE_FLUSH,
-                    null,
-                    "lumora_stop_reading"
-                )
-            }
-
-            command.contains("tạm dừng quan sát") ||
-                    command == "dừng quan sát" ||
-                    command == "tạm dừng" -> {
-                stopVintern()
-                        detectionEnabled = false
-                detectedText = "Đã tạm dừng quan sát"
-                speakMessage(
-                    "Đã tạm dừng quan sát.",
-                    TextToSpeech.QUEUE_FLUSH,
-                    null,
-                    "lumora_pause"
-                )
-            }
-
-            command.contains("quay lại quan sát") ||
-                    command.contains("bắt đầu quan sát") ||
-                    command == "quan sát" || command == "quan sát trực tiếp" -> {
-                        if (hasPermission) {
-                    hasCapturedResult = false
-                    vinternStatus = ""
-                    detectionEnabled = true
-                    detectedText = "Đã quay lại chế độ quan sát"
-                    speakMessage(
-                        "Đã quay lại chế độ quan sát.",
-                        TextToSpeech.QUEUE_FLUSH,
-                        null,
-                        "lumora_observe"
-                    )
-                } else {
-                    permissionLauncher.launch(Manifest.permission.CAMERA)
+        } else {
+            val action = parseVoiceCommand(spoken)
+            Log.i("LUMORA_VOICE", "command=${action?.name ?: "UNKNOWN"}, ocr=${ocrSettings.backend.value.name}")
+            showVoiceNotice(if (action == null) "Chưa nhận ra lệnh. Thử nói “đọc văn bản” hoặc “mô tả xung quanh”."
+                else "Đã nhận lệnh: ${action.label}" + if (action == VoiceCommand.READ) " · ${ocrSettings.backend.value.label}" else "")
+            when (action) {
+                VoiceCommand.HELP -> {
+                    startOnboardingInstructions()
                 }
-            }
-            command.contains("nhận diện lại") ||
-                    command.contains("chụp lại") ||
-                    command.contains("đọc phần khác") -> {
 
-                requestCapture(vinternMode)
-            }
-            command.contains("đọc lại") -> {
-                val textToRepeat = lastReadText
-                if (textToRepeat.isNotBlank() && ttsReady) {
+                VoiceCommand.DOWNLOAD -> startModelDownload()
+
+                VoiceCommand.DESCRIBE -> {
+                    requestCapture(VinternEngine.Mode.DESCRIBE)
+                }
+
+                VoiceCommand.READ -> { requestCapture(VinternEngine.Mode.READ) }
+
+                VoiceCommand.STOP_READING -> {
+                    stopVintern()
+                    ttsEngine?.stop()
+                    activeUtteranceId = null
+                    ttsSpeaking = false
+                    ignoreVoiceEcho = true
+                    Handler(Looper.getMainLooper()).postDelayed({
+                        if (!ttsSpeaking && activeUtteranceId == null) ignoreVoiceEcho = false
+                    }, 650L)
+                    speechCompletionTick++
                     speakMessage(
-                        "Tôi đọc lại nội dung. $textToRepeat",
+                        "Đã dừng đọc. Bạn có thể nói đọc lại hoặc nhận diện lại.",
                         TextToSpeech.QUEUE_FLUSH,
                         null,
-                        "lumora_repeat_ocr"
-                    )
-                } else if (ttsReady) {
-                    speakMessage(
-                        "Chưa có kết quả đọc từ model. Bạn có thể nói đọc văn bản.",
-                        TextToSpeech.QUEUE_FLUSH,
-                        null,
-                        "lumora_no_ocr"
+                        "lumora_stop_reading"
                     )
                 }
-            }
 
-            command.contains("lumora ơi") ||
-                    command.contains("lu mora ơi") ||
-                    command.contains("lu mo ra ơi") ||
-                    command.contains("lumo ra ơi") ||
-                    command.contains("trợ lý ơi") -> {
-                if (ttsReady) {
+                VoiceCommand.PAUSE -> {
+                    stopVintern()
+                    detectionEnabled = false
+                    detectedText = "Đã tạm dừng quan sát"
                     speakMessage(
-                        "Có tôi đây.",
+                        "Đã tạm dừng quan sát.",
                         TextToSpeech.QUEUE_FLUSH,
                         null,
-                        "lumora_wake_reply"
+                        "lumora_pause"
                     )
                 }
+
+                VoiceCommand.RESUME -> {
+                    if (hasPermission) {
+                        hasCapturedResult = false
+                        vinternStatus = ""
+                        detectionEnabled = true
+                        detectedText = "Đã quay lại chế độ quan sát"
+                        speakMessage(
+                            "Đã quay lại chế độ quan sát.",
+                            TextToSpeech.QUEUE_FLUSH,
+                            null,
+                            "lumora_observe"
+                        )
+                    } else {
+                        permissionLauncher.launch(Manifest.permission.CAMERA)
+                    }
+                }
+                VoiceCommand.RECAPTURE -> {
+
+                    requestCapture(vinternMode)
+                }
+                VoiceCommand.REPEAT -> {
+                    val textToRepeat = lastReadText
+                    if (textToRepeat.isNotBlank() && ttsReady) {
+                        speakMessage(
+                            "Tôi đọc lại nội dung. $textToRepeat",
+                            TextToSpeech.QUEUE_FLUSH,
+                            null,
+                            "lumora_repeat_ocr"
+                        )
+                    } else if (ttsReady) {
+                        speakMessage(
+                            "Chưa có kết quả đọc từ model. Bạn có thể nói đọc văn bản.",
+                            TextToSpeech.QUEUE_FLUSH,
+                            null,
+                            "lumora_no_ocr"
+                        )
+                    }
+                }
+
+                VoiceCommand.WAKE -> {
+                    if (ttsReady) {
+                        speakMessage(
+                            "Có tôi đây.",
+                            TextToSpeech.QUEUE_FLUSH,
+                            null,
+                            "lumora_wake_reply"
+                        )
+                    }
+                }
+                null -> Unit
             }
         }
     }
@@ -1067,9 +1051,11 @@ fun VietAssistScreen() {
                 ((!onboardingStarted && !ttsReady) || (onboardingStarted && !onboardingSpeaking)))),
         continuous = alwaysListening,
         ignoreCommandsWhileSpeaking = ignoreVoiceEcho,
+        appSpeech = appSpeech,
+        onListeningChanged = { voiceListening = it },
         onSessionFinished = { error ->
             manualVoicePending = false
-            if (error != null) voiceStatus = "Chưa nhận được lệnh. Kiểm tra micro hoặc mạng rồi nhấn để nói lại."
+            if (error != null) showVoiceNotice(recognitionErrorMessage(error))
         },
         onCommand = ::handleVoiceCommand
     )
@@ -1080,6 +1066,13 @@ fun VietAssistScreen() {
             cameraGranted = hasPermission, micGranted = micPermissionGranted,
             modelReady = modelReady, downloading = modelDownloading,
             preparationState = preparationState,
+            ttsStatus = ttsStatus,
+            ttsReady = ttsReady,
+            onTestVoice = { speakMessage("Xin chào. Tôi đang đọc tiếng Việt. Bạn có thể nói đọc văn bản để đọc chữ trước mặt.", TextToSpeech.QUEUE_FLUSH, null, "lumora_voice_test") },
+            onTtsSettings = {
+                try { context.startActivity(Intent("com.android.settings.TTS_SETTINGS")) }
+                catch (_: android.content.ActivityNotFoundException) { showVoiceNotice("Máy không mở được cài đặt giọng đọc. Hãy mở trong Cài đặt hệ thống.") }
+            },
             ocrBackend = ocrBackend,
             onOcrBackendChange = ocrSettings::select,
             alwaysListening = alwaysListening,
@@ -1204,11 +1197,13 @@ fun VietAssistScreen() {
                 ) { Text(if (manualVoicePending) "Đang nghe… Nhấn để dừng" else "Nhấn để nói") }
 
             } else {
-                Text("Luôn nghe đang bật", modifier = Modifier.weight(1f), color = accentGreen)
+                Text(if (voiceListening) "Luôn nghe · đang nghe" else "Luôn nghe · đang chờ", modifier = Modifier.weight(1f), color = accentGreen)
             }
 
             }
-            if (!alwaysListening && voiceStatus.isNotBlank()) Text(voiceStatus, color = accentGreen)
+            if (voiceStatus.isNotBlank()) Text(voiceStatus, color = accentGreen,
+                modifier = Modifier.semantics { liveRegion = androidx.compose.ui.semantics.LiveRegionMode.Polite })
+            if (!ttsReady) Text(ttsStatus, color = Color(0xFFFFD6A5), fontSize = 12.sp)
 
             // CAMERA
             Surface(
@@ -1407,6 +1402,8 @@ fun VoiceCommandListener(
     enabled: Boolean,
     ignoreCommandsWhileSpeaking: Boolean = false,
     continuous: Boolean = true,
+    appSpeech: String = "",
+    onListeningChanged: (Boolean) -> Unit = {},
     onSessionFinished: (Int?) -> Unit = {},
     onCommand: (String) -> Unit
 ) {
@@ -1414,6 +1411,8 @@ fun VoiceCommandListener(
     val lifecycleOwner = LocalLifecycleOwner.current
     val latestOnCommand by rememberUpdatedState(onCommand)
     val latestOnSessionFinished by rememberUpdatedState(onSessionFinished)
+    val latestOnListeningChanged by rememberUpdatedState(onListeningChanged)
+    val latestAppSpeech by rememberUpdatedState(appSpeech)
     val latestIgnoreCommandsWhileSpeaking by rememberUpdatedState(ignoreCommandsWhileSpeaking)
     var activityResumed by remember(lifecycleOwner) {
         mutableStateOf(lifecycleOwner.lifecycle.currentState.isAtLeast(Lifecycle.State.RESUMED))
@@ -1434,110 +1433,97 @@ fun VoiceCommandListener(
     // Chỉ Activity ở trạng thái RESUMED mới nghe lệnh đầy đủ. Khi Activity
     // chuyển ra nền, recognizer này bị hủy trước khi Service bắt đầu nghe wake word.
     LaunchedEffect(enabled, activityResumed, continuous) {
-        if (enabled && !continuous) {
-            if (!activityResumed) latestOnSessionFinished(null)
-            else if (!SpeechRecognizer.isRecognitionAvailable(context))
+        if (enabled) {
+            if (!activityResumed) {
+                latestOnListeningChanged(false)
+                if (!continuous) latestOnSessionFinished(null)
+            } else if (!SpeechRecognizer.isRecognitionAvailable(context)) {
                 latestOnSessionFinished(SpeechRecognizer.ERROR_CLIENT)
+            }
         }
     }
     DisposableEffect(context, enabled, activityResumed, continuous) {
         if (!enabled || !activityResumed || !SpeechRecognizer.isRecognitionAvailable(context)) {
             onDispose { }
         } else {
-            val recognizer = SpeechRecognizer.createSpeechRecognizer(context)
             val handler = Handler(Looper.getMainLooper())
             val intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
-                putExtra(
-                    RecognizerIntent.EXTRA_LANGUAGE_MODEL,
-                    RecognizerIntent.LANGUAGE_MODEL_FREE_FORM
-                )
+                putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
                 putExtra(RecognizerIntent.EXTRA_LANGUAGE, "vi-VN")
                 putExtra(RecognizerIntent.EXTRA_LANGUAGE_PREFERENCE, "vi-VN")
-                putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, false)
+                putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, true)
                 putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 3)
             }
-
-            // Ghi nhớ trạng thái tại lúc bắt đầu một phiên nghe. Nếu phiên đó bắt
-            // đầu khi TTS đang nói, bỏ kết quả phiên đó để tránh nhận nhầm tiếng vọng
-            // ngay cả khi TTS đã kết thúc trước lúc callback onResults đến.
             var disposed = false
-            fun sessionActive() = !disposed &&
+            var generation = 0L
+            var recognizer: SpeechRecognizer? = null
+            fun ownerActive() = !disposed &&
                 lifecycleOwner.lifecycle.currentState.isAtLeast(Lifecycle.State.RESUMED) &&
                 (VoiceSettings.get(context).alwaysListening.value == continuous)
-            var sessionStartedDuringSpeech = false
+
             val restartListening = object : Runnable {
                 override fun run() {
-                    if (!sessionActive()) return
-                    try {
-                        sessionStartedDuringSpeech = latestIgnoreCommandsWhileSpeaking
-                        recognizer.startListening(intent)
-                    } catch (error: Exception) {
-                        Log.w("LUMORA_VOICE", "Không thể bắt đầu nghe lệnh", error)
-                        if (continuous) handler.postDelayed(this, 1200L)
-                        else latestOnSessionFinished(SpeechRecognizer.ERROR_CLIENT)
+                    if (!ownerActive()) return
+                    val request = ++generation
+                    val current = SpeechRecognizer.createSpeechRecognizer(context)
+                    recognizer = current
+                    var finished = false
+                    var heardSpeech = false
+                    val startedDuringSpeech = latestIgnoreCommandsWhileSpeaking
+                    fun active() = ownerActive() && generation == request && !finished
+                    fun finish(error: Int? = null, command: String? = null, reportError: Boolean = true) {
+                        if (!active()) return
+                        finished = true
+                        latestOnListeningChanged(false)
+                        // Release only this session, before a callback can replace it.
+                        current.cancel()
+                        current.destroy()
+                        if (recognizer === current) recognizer = null
+                        if (command != null) latestOnCommand(command)
+                        else if (reportError) latestOnSessionFinished(error)
+                        if (continuous && ownerActive() && generation == request && error !in setOf(9, 12, 13)) {
+                            handler.postDelayed(this, if (error in setOf(5, 11)) 1200L else 900L)
+                        }
                     }
+                    fun handleResults(bundle: Bundle?, partial: Boolean) {
+                        if (!active()) return
+                        val matches = bundle?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION).orEmpty()
+                        val spoken = if (partial) matches.firstOrNull { parseExactVoiceCommand(it) != null }.orEmpty()
+                            else matches.firstOrNull { parseVoiceCommand(it) != null } ?: matches.firstOrNull().orEmpty()
+                        val echo = continuous && (startedDuringSpeech || latestIgnoreCommandsWhileSpeaking)
+                        val accepted = acceptVoiceResult(spoken, echo, latestAppSpeech)
+                        if (partial && !accepted) return
+                        finish(command = spoken.takeIf { accepted },
+                            error = if (!continuous && spoken.isBlank()) SpeechRecognizer.ERROR_NO_MATCH else null,
+                            reportError = !continuous)
+                    }
+                    current.setRecognitionListener(object : RecognitionListener {
+                        override fun onReadyForSpeech(params: Bundle?) { if (active()) latestOnListeningChanged(true) }
+                        override fun onBeginningOfSpeech() { if (active()) heardSpeech = true }
+                        override fun onRmsChanged(rmsdB: Float) = Unit
+                        override fun onBufferReceived(buffer: ByteArray?) = Unit
+                        override fun onEndOfSpeech() { if (active()) latestOnListeningChanged(false) }
+                        override fun onEvent(eventType: Int, params: Bundle?) = Unit
+                        override fun onResults(results: Bundle?) = handleResults(results, false)
+                        override fun onPartialResults(partialResults: Bundle?) = handleResults(partialResults, true)
+                        override fun onError(error: Int) {
+                            finish(error = error, reportError = !continuous || error !in setOf(6, 7) ||
+                                (heardSpeech && !startedDuringSpeech && !latestIgnoreCommandsWhileSpeaking))
+                        }
+                    })
+                    try { current.startListening(intent) }
+                    catch (_: Exception) { finish(SpeechRecognizer.ERROR_CLIENT) }
                 }
             }
-
-            recognizer.setRecognitionListener(object : RecognitionListener {
-                override fun onReadyForSpeech(params: Bundle?) = Unit
-                override fun onBeginningOfSpeech() = Unit
-                override fun onRmsChanged(rmsdB: Float) = Unit
-                override fun onBufferReceived(buffer: ByteArray?) = Unit
-                override fun onEndOfSpeech() = Unit
-                override fun onEvent(eventType: Int, params: Bundle?) = Unit
-
-                override fun onResults(results: Bundle?) {
-                    if (!sessionActive()) return
-                    val matches = results?.getStringArrayList(
-                        SpeechRecognizer.RESULTS_RECOGNITION
-                    )
-                    val spoken = matches?.firstOrNull().orEmpty()
-                    val normalizedSpoken = spoken.lowercase(Locale.forLanguageTag("vi-VN"))
-                        .replace(Regex("[^\\p{L}\\p{N}\\s]"), " ")
-                        .replace(Regex("\\s+"), " ")
-                        .trim()
-                    // Khi đang phát TTS, bỏ qua nội dung micro thu lại từ ứng dụng.
-                    // Chỉ giữ một số lệnh dừng ngắn để người dùng vẫn có thể ngắt lời đọc.
-                    val emergencyStop = normalizedSpoken in setOf(
-                        "tạm dừng", "dừng lại", "tạm dừng quan sát", "dừng quan sát",
-                        "dừng đọc", "ngừng đọc", "dừng đọc văn bản"
-                    )
-                    val sessionMayContainTtsEcho =
-                        sessionStartedDuringSpeech || latestIgnoreCommandsWhileSpeaking
-                    if (spoken.isNotBlank() &&
-                        (!continuous || !sessionMayContainTtsEcho || emergencyStop)
-                    ) {
-                        latestOnCommand(spoken)
-                    }
-                    handler.removeCallbacks(restartListening)
-                    if (continuous) handler.postDelayed(restartListening, 900L)
-                    else latestOnSessionFinished(if (spoken.isBlank()) SpeechRecognizer.ERROR_NO_MATCH else null)
-                }
-
-                override fun onError(error: Int) {
-                    if (!sessionActive()) return
-                    handler.removeCallbacks(restartListening)
-                    if (!continuous) {
-                        latestOnSessionFinished(error)
-                    } else if (error != SpeechRecognizer.ERROR_INSUFFICIENT_PERMISSIONS) {
-                        handler.postDelayed(
-                            restartListening,
-                            if (error == SpeechRecognizer.ERROR_CLIENT) 1200L else 900L
-                        )
-                    }
-                }
-
-                override fun onPartialResults(partialResults: Bundle?) = Unit
-            })
-
             handler.post(restartListening)
-
             onDispose {
                 disposed = true
+                generation++
+                latestOnListeningChanged(false)
                 handler.removeCallbacks(restartListening)
-                recognizer.cancel()
-                recognizer.destroy()
+                recognizer?.cancel()
+                recognizer?.destroy()
+                recognizer = null
             }
         }
     }

@@ -289,11 +289,7 @@ class LumoraVoiceService : Service() {
                 val engine = wakeTts
                 if (status == TextToSpeech.SUCCESS && engine != null) {
                     try {
-                        val languageResult = engine.setLanguage(Locale.forLanguageTag("vi-VN"))
-                        engine.setSpeechRate(0.9f)
-                        if (languageResult == TextToSpeech.LANG_MISSING_DATA ||
-                            languageResult == TextToSpeech.LANG_NOT_SUPPORTED
-                        ) {
+                        if (!VietnameseSpeech.configure(engine)) {
                             Log.w(TAG, "TTS tiếng Việt không khả dụng trên thiết bị")
                             updateNotification("Đã nghe câu gọi; giọng tiếng Việt chưa sẵn sàng")
                             return@TextToSpeech

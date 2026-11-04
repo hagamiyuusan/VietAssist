@@ -29,6 +29,10 @@ fun DeviceSetupScreen(
     onRefresh: () -> Unit,
     onReadStatus: () -> Unit,
     onContinue: () -> Unit,
+    ttsStatus: String = "Chưa kiểm tra giọng đọc",
+    ttsReady: Boolean = false,
+    onTestVoice: () -> Unit = {},
+    onTtsSettings: () -> Unit = {},
     ocrBackend: OcrBackend = OcrBackend.ML_KIT,
     onOcrBackendChange: (OcrBackend) -> Unit = {},
     alwaysListening: Boolean = false,
@@ -70,6 +74,11 @@ fun DeviceSetupScreen(
             if (!cameraGranted) SetupButton("Cấp quyền camera", onCamera)
             VoiceModeSettings(alwaysListening, onVoiceModeChange)
             OcrSettingsControl(ocrBackend, onOcrBackendChange)
+            SetupRequirement("Giọng đọc tiếng Việt", ttsStatus)
+            SetupButton("Nghe thử tiếng Việt", onTestVoice, enabled = ttsReady)
+            TextButton(onClick = onTtsSettings, modifier = Modifier.heightIn(min = 48.dp)) {
+                Text("Cài đặt giọng đọc", color = accent)
+            }
             SetupRequirement("Micro", if (micGranted) "Đã cấp quyền." else "Tùy chọn: cần để điều khiển bằng giọng nói. Vẫn dùng được nút bấm.")
             if (!micGranted) SetupButton("Cấp quyền micro", onMicrophone)
             if (!cameraGranted || !micGranted) {
