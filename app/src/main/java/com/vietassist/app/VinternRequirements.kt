@@ -20,10 +20,10 @@ data class VinternRequirements(
 ) {
     val hardwareBlocker: String?
         get() = when {
-            androidSdk < 28 -> "Vintern GPU cần Android 9 trở lên. Nhận diện và đọc nhanh vẫn dùng được."
+            androidSdk < 28 -> "Vintern GPU cần Android 9 trở lên. Camera và nhận diện vật thể vẫn dùng được."
             !is64Bit -> "Vintern cần ứng dụng chạy ở chế độ 64 bit."
             !nativeLibraryPresent -> "Bản cài này thiếu thư viện Vintern cho máy. Hãy cài bản phù hợp."
-            !openClAvailable -> "Vintern cần driver GPU OpenCL được hãng điện thoại cung cấp. Nhận diện và đọc nhanh vẫn dùng được."
+            !openClAvailable -> "Vintern cần driver GPU OpenCL được hãng điện thoại cung cấp. Camera và nhận diện vật thể vẫn dùng được."
             else -> null
         }
 

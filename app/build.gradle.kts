@@ -88,6 +88,7 @@ dependencies {
     androidTestImplementation(libs.androidx.junit)
     debugImplementation(libs.androidx.compose.ui.test.manifest)
     debugImplementation(libs.androidx.compose.ui.tooling)
+    implementation("com.google.mlkit:text-recognition:16.0.1")
     implementation("androidx.camera:camera-core:1.4.2")
     implementation("androidx.camera:camera-camera2:1.4.2")
     implementation("androidx.camera:camera-lifecycle:1.4.2")
@@ -96,7 +97,6 @@ dependencies {
 
     implementation("com.google.mlkit:object-detection-custom:17.0.2")
     implementation("org.tensorflow:tensorflow-lite-task-vision:0.4.4")
-    implementation("com.google.mlkit:text-recognition:16.0.1")
 
 
 }

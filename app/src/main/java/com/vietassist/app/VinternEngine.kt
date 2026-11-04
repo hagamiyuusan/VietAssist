@@ -36,7 +36,7 @@ internal object VinternNative {
 /**
  * Chạy Vintern-1B-v3.5 trên máy cho hai lệnh chụp một lần:
  * mô tả xung quanh và đọc chi tiết tài liệu.
- * EfficientDet vẫn đảm nhận nhận diện vật thể liên tục; ML Kit vẫn đảm nhận đọc nhanh.
+ * EfficientDet đảm nhận nhận diện vật thể liên tục; cả mô tả và đọc chữ dùng model này.
  */
 object VinternEngine {
     private const val TAG = "LUMORA_VINTERN"

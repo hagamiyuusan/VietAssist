@@ -12,8 +12,6 @@ import android.os.Looper
 import android.os.Bundle
 import android.os.Build
 import java.util.Locale
-import androidx.compose.ui.graphics.ImageBitmap
-import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.Color
 import androidx.compose.foundation.shape.RoundedCornerShape
 import android.Manifest
@@ -23,12 +21,9 @@ import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
-import androidx.camera.core.CameraSelector
-import androidx.camera.core.ImageAnalysis
-import androidx.camera.core.Preview
-import androidx.camera.lifecycle.ProcessCameraProvider
-import androidx.camera.view.PreviewView
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.runtime.saveable.rememberSaveable
@@ -37,54 +32,18 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import android.graphics.Bitmap
-import android.graphics.Matrix
-import android.graphics.Canvas
-import android.graphics.Paint
-import android.graphics.ColorMatrix
-import android.graphics.ColorMatrixColorFilter
 import androidx.camera.core.ImageProxy
-import org.tensorflow.lite.support.image.TensorImage
-import org.tensorflow.lite.task.vision.detector.ObjectDetector
 import java.util.concurrent.atomic.AtomicLong
 import com.vietassist.app.ui.theme.VietAssistTheme
-import java.util.concurrent.Executors
-import com.google.mlkit.vision.common.InputImage
-import com.google.mlkit.vision.text.TextRecognition
-import com.google.mlkit.vision.text.latin.TextRecognizerOptions
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
-
-// Tăng tương phản nhẹ trên BẢN SAO dành riêng cho OCR.
-// Không thay đổi bitmap đầu vào của EfficientDet.
-private fun createOcrContrastBitmap(source: Bitmap): Bitmap {
-    val output = Bitmap.createBitmap(
-        source.width,
-        source.height,
-        Bitmap.Config.ARGB_8888
-    )
-    val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-        colorFilter = ColorMatrixColorFilter(
-            ColorMatrix(
-                floatArrayOf(
-                    1.08f, 0f, 0f, 0f, -8f,
-                    0f, 1.08f, 0f, 0f, -8f,
-                    0f, 0f, 1.08f, 0f, -8f,
-                    0f, 0f, 0f, 1f, 0f
-                )
-            )
-        )
-    }
-    Canvas(output).drawBitmap(source, 0f, 0f, paint)
-    return output
-}
 
 class MainActivity : ComponentActivity() {
     var wakeRequest by mutableIntStateOf(0)
@@ -160,6 +119,9 @@ class MainActivity : ComponentActivity() {
 fun VietAssistScreen() {
     val context = LocalContext.current
     val hostActivity = context as? MainActivity
+    val ocrSettings = remember(context) { OcrSettings.get(context) }
+    val ocrBackend by ocrSettings.backend.collectAsState()
+    var capturedOcrBackend by remember { mutableStateOf(OcrBackend.ML_KIT) }
     val voiceSettings = remember(context) { VoiceSettings.get(context) }
     val alwaysListening by voiceSettings.alwaysListening.collectAsState()
     var manualVoicePending by rememberSaveable { mutableStateOf(false) }
@@ -246,25 +208,21 @@ fun VietAssistScreen() {
         }
     }
 
-    var cameraStarted by remember {
-        mutableStateOf(false)
+    var detectionEnabled by remember {
+        mutableStateOf(true)
     }
 
-    var readingMode by remember { mutableStateOf(false) }
     var onboardingStarted by remember { mutableStateOf(onboardingAlreadyCompleted) }
     var onboardingWaiting by remember { mutableStateOf(false) }
     var onboardingSpeaking by remember { mutableStateOf(false) }
     var onboardingDone by remember { mutableStateOf(onboardingAlreadyCompleted) }
     var micPermissionRequestPending by remember { mutableStateOf(false) }
-    // Mỗi lần tăng biến này, OCR sẽ nhận diện lại văn bản.
-    var ocrCaptureRequest by remember { mutableStateOf(0) }
-
     // Vintern (AI đọc ảnh chạy trên máy): chụp một khung hình rồi mô tả hoặc đọc chi tiết.
     val coroutineScope = rememberCoroutineScope()
     var vinternCaptureRequest by remember { mutableIntStateOf(0) }
     val vinternRun = remember { AtomicLong(0) }
     val vinternCancellation = remember { AtomicLong(0) }
-    var vinternSnapshot by remember { mutableStateOf<ImageBitmap?>(null) }
+    var hasCapturedResult by remember { mutableStateOf(false) }
     DisposableEffect(Unit) {
         onDispose {
             vinternRun.incrementAndGet()
@@ -310,8 +268,8 @@ fun VietAssistScreen() {
         mutableStateOf(0L)
     }
 
-    // Lưu riêng nội dung OCR cuối cùng đã đọc.
-    var lastSpokenOcrText by remember {
+    // Nội dung đọc bởi model đã cấu hình, dùng lại cho lệnh đọc lại.
+    var lastReadText by remember {
         mutableStateOf("")
     }
 
@@ -369,8 +327,8 @@ fun VietAssistScreen() {
         val result = speakMessage(
             "Tôi sẽ hướng dẫn ngắn gọn. " +
                     "Nói bắt đầu quan sát để nhận biết vật thể xung quanh. " +
-                    "Nói đọc văn bản để đọc sách hoặc tài liệu. " +
-                    "Nói nhận diện lại để đọc phần chữ khác. " +
+                    "Nói đọc văn bản để dùng OCR đã chọn trong Thiết lập. " +
+                    "Nói chụp lại để phân tích ảnh mới. " +
                     "Nói chụp và mô tả chi tiết để AI phân tích một ảnh trước mặt, " +
                     "hoặc đọc chi tiết để AI đọc kỹ tài liệu. " +
                     "Lần đầu dùng hai lệnh này, hãy nói tải mô hình khi có Wi-Fi. " +
@@ -532,42 +490,22 @@ fun VietAssistScreen() {
     LaunchedEffect(
         speechText,
         ttsReady,
-        readingMode,
         onboardingSpeaking,
         onboardingWaiting,
         speechCompletionTick,
         vinternBusy,
-        vinternSnapshot,
+        hasCapturedResult,
         showDeviceSetup
     ) {
         val message = speechText ?: return@LaunchedEffect
         if (showDeviceSetup || !ttsReady || message.isBlank()) return@LaunchedEffect
         // Trong lúc AI phân tích ảnh, không chen thông báo vật thể vào.
-        if (vinternBusy || vinternSnapshot != null) return@LaunchedEffect
+        if (vinternBusy || hasCapturedResult) return@LaunchedEffect
 
         // Debounce các cập nhật khung hình liên tiếp; chỉ lấy kết quả mới nhất.
         kotlinx.coroutines.delay(220)
 
-        val ocrPrefix = "Nội dung nhận diện được như sau: "
-        val isOcrMessage = message.startsWith(ocrPrefix)
-        val isOcrStatus = message.startsWith("OCR_STATUS:")
-        val currentOcrText = if (isOcrMessage) message.removePrefix(ocrPrefix).trim() else ""
-        val spokenOcrStatus = if (isOcrStatus) message.removePrefix("OCR_STATUS:").trim() else ""
-
-        // Giữ hai chế độ độc lập, không phát vật thể khi đang đọc tài liệu và ngược lại.
-        if (readingMode && !isOcrMessage && !isOcrStatus) return@LaunchedEffect
-        if (!readingMode && (isOcrMessage || isOcrStatus)) return@LaunchedEffect
-        if (onboardingSpeaking || onboardingWaiting) return@LaunchedEffect
-
-        if (isOcrMessage) {
-            if (currentOcrText.isBlank() || currentOcrText == lastSpokenOcrText) {
-                return@LaunchedEffect
-            }
-        } else if (isOcrStatus) {
-            if (spokenOcrStatus.isBlank() || message == lastSpokenText) return@LaunchedEffect
-        } else if (message == lastSpokenText) {
-            return@LaunchedEffect
-        }
+        if (onboardingSpeaking || onboardingWaiting || message == lastSpokenText) return@LaunchedEffect
 
         // Không bao giờ dùng QUEUE_FLUSH để cắt ngang một câu tự động đang phát.
         // Một số TTS báo isSpeaking chậm hơn callback, nên chờ ngắn rồi kiểm tra lại.
@@ -576,12 +514,8 @@ fun VietAssistScreen() {
             if (ttsSpeaking || ttsEngine?.isSpeaking == true) return@LaunchedEffect
         }
 
-        // Hạn chế đọc vật thể liên tục khi camera dao động, nhưng vẫn phản hồi nhanh.
-        if (!isOcrMessage && !isOcrStatus) {
-            val elapsed = System.currentTimeMillis() - lastSpokenAt
-            val remaining = 1800L - elapsed
-            if (remaining > 0L) kotlinx.coroutines.delay(remaining)
-        }
+        val remaining = 1800L - (System.currentTimeMillis() - lastSpokenAt)
+        if (remaining > 0L) kotlinx.coroutines.delay(remaining)
 
         if (ttsSpeaking || ttsEngine?.isSpeaking == true) {
             kotlinx.coroutines.delay(180)
@@ -597,8 +531,6 @@ fun VietAssistScreen() {
 
         if (result == TextToSpeech.SUCCESS) {
             lastSpokenText = message
-            if (isOcrMessage) lastSpokenOcrText = currentOcrText
-            if (!isOcrMessage) lastSpokenText = message
             lastSpokenAt = now
         }
     }
@@ -617,7 +549,7 @@ fun VietAssistScreen() {
             ActivityResultContracts.RequestPermission()
         ) { granted ->
             hasPermission = granted
-            cameraStarted = granted && !showDeviceSetup
+            detectionEnabled = granted
 
             detectedText = if (granted) {
                 "Đang khởi động nhận diện AI..."
@@ -742,7 +674,7 @@ fun VietAssistScreen() {
                 when (val state = preparationState) {
                     VinternEngine.PreparationState.Ready -> "AI đã sẵn sàng. Bạn có thể nói mô tả xung quanh hoặc đọc chi tiết."
                     is VinternEngine.PreparationState.Failed -> state.message
-                    else -> "Mô hình đã tải xong. AI đang chuẩn bị; bạn vẫn có thể đọc chữ nhanh."
+                    else -> "Mô hình đã tải xong. AI đang chuẩn bị; bạn vẫn có thể dùng OCR ML Kit trong Thiết lập."
                 },
                 TextToSpeech.QUEUE_FLUSH,
                 null,
@@ -783,7 +715,7 @@ fun VietAssistScreen() {
                 vinternStatus = "Đã tải xong. Đang chuẩn bị AI…"
                 VinternEngine.prepare(context, retry = true)
                 speakMessage(
-                    "Đã tải xong mô hình. Tôi đang chuẩn bị AI; đọc chữ nhanh vẫn dùng được.",
+                    "Đã tải xong mô hình. Tôi đang chuẩn bị AI; OCR bằng ML Kit vẫn dùng được.",
                     TextToSpeech.QUEUE_FLUSH,
                     null,
                     "lumora_model_downloaded"
@@ -800,33 +732,36 @@ fun VietAssistScreen() {
         }
     }
 
-    fun requestVintern(mode: VinternEngine.Mode) {
-        deviceRequirements = VinternRequirements.read(context)
-        val blocked = deviceRequirements.inferenceBlocker
-        if (blocked != null) {
-            vinternStatus = blocked
-            showDeviceSetup = true
-            speakMessage(blocked, TextToSpeech.QUEUE_FLUSH, null, "lumora_requirements")
-            return
-        }
-        if (!modelReady) {
-            showDeviceSetup = true
-            speakMessage(
-                "Chức năng này cần mô hình AI $modelSizeText. Hãy nói tải mô hình khi có Wi-Fi.",
-                TextToSpeech.QUEUE_FLUSH,
-                null,
-                "lumora_model_missing"
-            )
-            return
-        }
-        if (!aiReady) {
-            speakMessage(
-                if (preparationState is VinternEngine.PreparationState.Failed)
-                    "AI chưa sẵn sàng. Hãy chọn thử chuẩn bị AI lại; bạn vẫn có thể đọc chữ nhanh."
-                else "AI đang chuẩn bị. Bạn có thể dùng đọc chữ nhanh trong lúc chờ.",
-                TextToSpeech.QUEUE_FLUSH, null, "lumora_ai_preparing"
-            )
-            return
+    fun requestCapture(mode: VinternEngine.Mode) {
+        val useVintern = usesVintern(mode, ocrSettings.backend.value)
+        if (useVintern) {
+            deviceRequirements = VinternRequirements.read(context)
+            val blocked = deviceRequirements.inferenceBlocker
+            if (blocked != null) {
+                vinternStatus = blocked
+                showDeviceSetup = true
+                speakMessage(blocked, TextToSpeech.QUEUE_FLUSH, null, "lumora_requirements")
+                return
+            }
+            if (!modelReady) {
+                showDeviceSetup = true
+                speakMessage(
+                    "Chức năng này cần mô hình AI $modelSizeText. Hãy nói tải mô hình khi có Wi-Fi.",
+                    TextToSpeech.QUEUE_FLUSH,
+                    null,
+                    "lumora_model_missing"
+                )
+                return
+            }
+            if (!aiReady) {
+                speakMessage(
+                    if (preparationState is VinternEngine.PreparationState.Failed)
+                        "AI chưa sẵn sàng. Hãy chọn thử chuẩn bị AI lại; bạn vẫn có thể dùng OCR ML Kit trong Thiết lập."
+                    else "AI đang chuẩn bị. Bạn vẫn có thể đọc bằng OCR ML Kit nếu đã chọn trong Thiết lập.",
+                    TextToSpeech.QUEUE_FLUSH, null, "lumora_ai_preparing"
+                )
+                return
+            }
         }
         if (vinternBusy) {
             speakMessage(
@@ -842,26 +777,24 @@ fun VietAssistScreen() {
             return
         }
 
-        // Tắt chế độ đọc nhanh của ML Kit để hai kết quả không đọc chồng lên nhau.
-        readingMode = false
-        cameraStarted = true
+        capturedOcrBackend = ocrSettings.backend.value
+        detectionEnabled = true
         vinternMode = mode
         vinternBusy = true
         vinternCancelled = false
         vinternAwaitingFrame = true
         val request = vinternRun.incrementAndGet()
-        vinternSnapshot = null
+        hasCapturedResult = false
         vinternStatus = if (mode == VinternEngine.Mode.DESCRIBE) {
             "Đang chụp ảnh để mô tả chi tiết..."
         } else {
-            "AI đang đọc chi tiết..."
+            "Đang chụp để đọc chữ bằng ${capturedOcrBackend.label}..."
         }
         speakMessage(
             if (mode == VinternEngine.Mode.DESCRIBE) {
                 "Giữ điện thoại yên, tôi đang chụp và mô tả."
             } else {
-                "Giữ điện thoại yên trên tài liệu, tôi đang chụp và đọc chi tiết. " +
-                        "Việc này có thể mất vài chục giây."
+                "Giữ điện thoại yên trên tài liệu, tôi đang chụp để đọc chữ bằng ${capturedOcrBackend.label}."
             },
             TextToSpeech.QUEUE_FLUSH,
             null,
@@ -887,7 +820,7 @@ fun VietAssistScreen() {
         }
     }
 
-    fun handleVinternFrame(request: Long, frame: Bitmap) {
+    fun handleCapturedFrame(request: Long, frame: Bitmap) {
         if (vinternRun.get() != request || !vinternAwaitingFrame) {
             frame.recycle()
             return
@@ -895,16 +828,19 @@ fun VietAssistScreen() {
         vinternAwaitingFrame = false
         vinternCaptureRequest = 0
         // Bản sao chỉ dành cho UI; bitmap gốc được VinternEngine sở hữu và giải phóng.
-        vinternSnapshot = frame.copy(Bitmap.Config.ARGB_8888, false).asImageBitmap()
+        hasCapturedResult = true
         vinternStatus = "Đang phân tích ảnh đã chụp..."
         speakMessage("Đã chụp ảnh. Tôi đang phân tích.", TextToSpeech.QUEUE_FLUSH, null, "lumora_frame_captured")
         val mode = vinternMode
+        val backend = capturedOcrBackend
         coroutineScope.launch {
-            val result = VinternEngine.analyze(context, frame, mode, vinternCancellation)
+            val result = if (!usesVintern(mode, backend))
+                MlKitOcr.read(frame)
+            else VinternEngine.analyze(context, frame, mode, vinternCancellation)
             if (vinternRun.get() != request) return@launch
             vinternBusy = false
             if (vinternCancelled) {
-                vinternSnapshot = null
+                hasCapturedResult = false
                 vinternStatus = "Đã dừng phân tích ảnh."
                 return@launch
             }
@@ -915,8 +851,8 @@ fun VietAssistScreen() {
                         "AI mô tả: ${result.text}"
                     } else {
                         // Cho phép lệnh "đọc lại" đọc lại kết quả này.
-                        lastSpokenOcrText = result.text
-                        "AI đọc được: ${result.text}"
+                        lastReadText = result.text
+                        "${backend.label} đọc được: ${result.text}"
                     }
                     vinternStatus = message
                     speakMessage(
@@ -937,16 +873,17 @@ fun VietAssistScreen() {
                     )
                 }
                 VinternEngine.Result.Failed -> {
-                    vinternStatus = "Chưa phân tích được ảnh. Hãy thử lại hoặc kiểm tra thiết lập GPU."
+                    vinternStatus = if (usesVintern(mode, backend)) "AI chưa phân tích được ảnh. Hãy thử lại hoặc kiểm tra Thiết lập."
+                        else "OCR ML Kit chưa đọc được ảnh. Hãy giữ máy yên, đủ sáng rồi nói chụp lại."
                     speakMessage(
-                        "AI chưa phân tích được hình ảnh. Hãy thử lại.",
+                        vinternStatus,
                         TextToSpeech.QUEUE_FLUSH,
                         null,
                         "lumora_vintern_failed"
                     )
                 }
                 VinternEngine.Result.Cancelled -> {
-                    vinternSnapshot = null
+                    hasCapturedResult = false
                     vinternStatus = "Đã dừng phân tích ảnh."
                 }
             }
@@ -955,7 +892,7 @@ fun VietAssistScreen() {
 
     fun stopVintern() {
         vinternCancelled = true
-        vinternSnapshot = null
+        hasCapturedResult = false
         if (vinternBusy) vinternStatus = "Đang dừng phân tích ảnh..."
         VinternEngine.cancel(vinternCancellation)
         if (vinternAwaitingFrame) {
@@ -963,37 +900,6 @@ fun VietAssistScreen() {
             vinternAwaitingFrame = false
             vinternBusy = false
             vinternStatus = ""
-        }
-    }
-
-    fun startQuickReading() {
-        stopVintern()
-        readingMode = true
-        lastSpokenOcrText = ""
-
-        if (hasPermission) {
-            cameraStarted = true
-            ocrCaptureRequest++
-
-            detectedText =
-                "Đang chuẩn bị đọc. Hãy đặt toàn bộ văn bản vào giữa khung hình."
-
-            if (ttsReady) {
-                speakMessage(
-                    "Đã bật chế độ đọc văn bản. " +
-                            "Hãy đặt tài liệu trên mặt phẳng, " +
-                            "đưa toàn bộ phần chữ vào giữa khung hình. " +
-                            "Giữ điện thoại song song với mặt giấy, " +
-                            "đảm bảo đủ ánh sáng và giữ điện thoại yên. " +
-                            "Tôi sẽ nhận diện chữ rồi đọc cho bạn nghe. " +
-                            "Nếu muốn đọc lại phần khác, hãy nói nhận diện lại.",
-                    TextToSpeech.QUEUE_FLUSH,
-                    null,
-                    "lumora_read_guidance"
-                )
-            }
-        } else {
-            permissionLauncher.launch(Manifest.permission.CAMERA)
         }
     }
 
@@ -1046,19 +952,19 @@ fun VietAssistScreen() {
             command.contains("mô tả") ||
                     command.contains("xung quanh có gì") ||
                     command.contains("trước mặt có gì") -> {
-                requestVintern(VinternEngine.Mode.DESCRIBE)
+                requestCapture(VinternEngine.Mode.DESCRIBE)
             }
 
             command.contains("đọc chi tiết") ||
                     command.contains("đọc kỹ") -> {
-                requestVintern(VinternEngine.Mode.READ)
+                requestCapture(VinternEngine.Mode.READ)
             }
 
             command.contains("đọc văn bản") ||
                     command.contains("đọc tài liệu") ||
                     command.contains("hãy đọc") -> {
 
-                startQuickReading()
+                requestCapture(VinternEngine.Mode.READ)
             }
 
             command == "dừng đọc" ||
@@ -1085,8 +991,7 @@ fun VietAssistScreen() {
                     command == "dừng quan sát" ||
                     command == "tạm dừng" -> {
                 stopVintern()
-                readingMode = false
-                cameraStarted = false
+                        detectionEnabled = false
                 detectedText = "Đã tạm dừng quan sát"
                 speakMessage(
                     "Đã tạm dừng quan sát.",
@@ -1099,9 +1004,10 @@ fun VietAssistScreen() {
             command.contains("quay lại quan sát") ||
                     command.contains("bắt đầu quan sát") ||
                     command == "quan sát" || command == "quan sát trực tiếp" -> {
-                readingMode = false
-                if (hasPermission) {
-                    cameraStarted = true
+                        if (hasPermission) {
+                    hasCapturedResult = false
+                    vinternStatus = ""
+                    detectionEnabled = true
                     detectedText = "Đã quay lại chế độ quan sát"
                     speakMessage(
                         "Đã quay lại chế độ quan sát.",
@@ -1117,42 +1023,20 @@ fun VietAssistScreen() {
                     command.contains("chụp lại") ||
                     command.contains("đọc phần khác") -> {
 
-                if (readingMode && hasPermission) {
-                    lastSpokenOcrText = ""
-                    ocrCaptureRequest++
-                    detectedText =
-                        "Đang nhận diện lại. Hãy đặt phần văn bản mới vào giữa khung hình."
-
-                    if (ttsReady) {
-                        speakMessage(
-                            "Được rồi. Hãy đưa phần văn bản cần đọc vào giữa khung hình, " +
-                                    "giữ điện thoại yên. Tôi đang nhận diện lại.",
-                            TextToSpeech.QUEUE_FLUSH,
-                            null,
-                            "lumora_recapture_guidance"
-                        )
-                    }
-                } else if (ttsReady) {
-                    speakMessage(
-                        "Bạn hãy nói đọc văn bản trước.",
-                        TextToSpeech.QUEUE_FLUSH,
-                        null,
-                        "lumora_recapture_not_reading"
-                    )
-                }
+                requestCapture(vinternMode)
             }
             command.contains("đọc lại") -> {
-                val textToRepeat = lastSpokenOcrText
+                val textToRepeat = lastReadText
                 if (textToRepeat.isNotBlank() && ttsReady) {
                     speakMessage(
-                        "Tôi đọc lại nội dung đã nhận diện. $textToRepeat",
+                        "Tôi đọc lại nội dung. $textToRepeat",
                         TextToSpeech.QUEUE_FLUSH,
                         null,
                         "lumora_repeat_ocr"
                     )
                 } else if (ttsReady) {
                     speakMessage(
-                        "Chưa có văn bản nào được nhận diện để đọc lại.",
+                        "Chưa có kết quả đọc từ model. Bạn có thể nói đọc văn bản.",
                         TextToSpeech.QUEUE_FLUSH,
                         null,
                         "lumora_no_ocr"
@@ -1196,6 +1080,8 @@ fun VietAssistScreen() {
             cameraGranted = hasPermission, micGranted = micPermissionGranted,
             modelReady = modelReady, downloading = modelDownloading,
             preparationState = preparationState,
+            ocrBackend = ocrBackend,
+            onOcrBackendChange = ocrSettings::select,
             alwaysListening = alwaysListening,
             onVoiceModeChange = { enabled ->
                 manualVoicePending = false
@@ -1221,7 +1107,7 @@ fun VietAssistScreen() {
                     ?: if (modelReady) when (val state = preparationState) {
                         VinternEngine.PreparationState.Ready -> "AI đã sẵn sàng. Bạn có thể mô tả ảnh hoặc đọc chi tiết."
                         is VinternEngine.PreparationState.Failed -> state.message
-                        else -> "Đã tải mô hình. AI đang chuẩn bị; đọc chữ nhanh vẫn dùng được."
+                        else -> "Đã tải mô hình. AI đang chuẩn bị; camera và OCR ML Kit vẫn dùng được."
                     }
                     else deviceRequirements.downloadBlocker ?: "Máy có thể tải mô hình AI, $modelSizeText."
                 speakMessage(message, TextToSpeech.QUEUE_FLUSH, null, "lumora_setup_status")
@@ -1281,17 +1167,8 @@ fun VietAssistScreen() {
                     shape = RoundedCornerShape(50)
                 ) {
                     Text(
-                        text = if (vinternBusy) {
-                            "ĐANG PHÂN TÍCH ẢNH"
-                        } else if (vinternSnapshot != null) {
-                            "ẢNH ĐÃ CHỤP"
-                        } else if (cameraStarted && readingMode) {
-                            "ĐỌC CHỮ NHANH"
-                        } else if (cameraStarted) {
-                            "QUAN SÁT TRỰC TIẾP"
-                        } else {
-                            "CAMERA TẠM DỪNG"
-                        },
+                        text = if (vinternBusy) "ĐANG XỬ LÝ ẢNH"
+                            else if (hasPermission) "CAMERA TRỰC TIẾP" else "CHƯA CẤP CAMERA",
                         color = accentGreen,
                         fontSize = 11.sp,
                         modifier = Modifier.padding(
@@ -1302,6 +1179,8 @@ fun VietAssistScreen() {
                 }
             }
 
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp),
+                verticalAlignment = Alignment.CenterVertically) {
             TextButton(
                 onClick = { manualVoicePending = false; showDeviceSetup = true },
                 enabled = !vinternBusy,
@@ -1320,13 +1199,16 @@ fun VietAssistScreen() {
                             startManualVoice()
                         }
                     },
-                    modifier = Modifier.fillMaxWidth().heightIn(min = 56.dp),
+                    modifier = Modifier.weight(1f).heightIn(min = 56.dp),
                     colors = ButtonDefaults.buttonColors(containerColor = accentGreen, contentColor = deepGreen)
                 ) { Text(if (manualVoicePending) "Đang nghe… Nhấn để dừng" else "Nhấn để nói") }
-                if (voiceStatus.isNotBlank()) Text(voiceStatus, color = accentGreen)
+
             } else {
-                Text("Luôn nghe đang bật · đổi trong Thiết lập", color = accentGreen)
+                Text("Luôn nghe đang bật", modifier = Modifier.weight(1f), color = accentGreen)
             }
+
+            }
+            if (!alwaysListening && voiceStatus.isNotBlank()) Text(voiceStatus, color = accentGreen)
 
             // CAMERA
             Surface(
@@ -1339,17 +1221,15 @@ fun VietAssistScreen() {
                 Box(
                     modifier = Modifier.fillMaxSize()
                 ) {
-                    if (cameraStarted && hasPermission && vinternSnapshot == null) {
+                    if (hasPermission) {
                         CameraPreview(
                             modifier = Modifier.fillMaxSize(),
-                            ocrEnabled = readingMode,
-                            ocrCaptureRequest = ocrCaptureRequest,
                             onDetection = { result ->
                                 detectedText = result
                             },
-                            analysisPaused = vinternBusy || vinternSnapshot != null,
+                            analysisPaused = vinternBusy || !detectionEnabled,
                             vinternCaptureRequest = vinternCaptureRequest,
-                            onVinternFrame = { request, frame -> handleVinternFrame(request, frame) }
+                            onVinternFrame = { request, frame -> handleCapturedFrame(request, frame) }
                         )
                     } else {
                         Column(
@@ -1371,21 +1251,19 @@ fun VietAssistScreen() {
 
                             Text(
                                 text = if (hasPermission) {
-                                    "Camera sẵn sàng khởi động"
+                                    "Camera đang chuẩn bị"
                                 } else {
                                     "Cần cấp quyền camera"
                                 },
                                 color = white,
                                 fontSize = 16.sp
                             )
+                            if (!hasPermission) Button(onClick = { permissionLauncher.launch(Manifest.permission.CAMERA) }) {
+                                Text("Cấp quyền camera")
+                            }
                         }
                     }
-                    vinternSnapshot?.let { snapshot ->
-                        VinternSnapshotPreview(snapshot, vinternBusy) {
-                            vinternSnapshot = null
-                            vinternStatus = ""
-                        }
-                    }
+
                 }
             }
 
@@ -1396,22 +1274,22 @@ fun VietAssistScreen() {
                 shape = RoundedCornerShape(18.dp)
             ) {
                 Column(
-                    modifier = Modifier.padding(14.dp),
+                    modifier = Modifier.heightIn(max = 140.dp).verticalScroll(rememberScrollState()).padding(14.dp),
                     verticalArrangement = Arrangement.spacedBy(6.dp)
                 ) {
                     Text(
-                        text = if (vinternSnapshot != null) "KẾT QUẢ ẢNH ĐÃ CHỤP" else if (readingMode) "CHẾ ĐỘ ĐỌC TÀI LIỆU" else "KẾT QUẢ NHẬN DIỆN",
+                        text = if (hasCapturedResult) "KẾT QUẢ TỪ ẢNH VỪA CHỤP" else "VẬT THỂ TRONG CAMERA",
                         color = accentGreen,
                         fontSize = 12.sp
                     )
 
                     Text(
-                        text = if (vinternSnapshot != null) vinternStatus else detectedText,
+                        text = if (hasCapturedResult) vinternStatus else (speechText ?: detectedText),
                         color = white,
                         fontSize = 16.sp
                     )
 
-                    if (vinternStatus.isNotBlank() && vinternSnapshot == null) {
+                    if (vinternStatus.isNotBlank() && !hasCapturedResult) {
                         Text(
                             text = vinternStatus,
                             color = accentGreen,
@@ -1469,10 +1347,10 @@ fun VietAssistScreen() {
                 }
             }
 
-            if (modelReady && !vinternBusy) VinternPreparationStatus(preparationState)
+            if (modelReady && !vinternBusy && !aiReady) VinternPreparationStatus(preparationState)
 
             Text(
-                "AI nâng cao tùy chọn · chụp một ảnh để mô tả chi tiết.",
+                "Đọc chữ: nói “đọc văn bản” · OCR: ${ocrBackend.label}",
                 color = accentGreen, fontSize = 12.sp
             )
             Button(
@@ -1481,7 +1359,7 @@ fun VietAssistScreen() {
                         !modelReady -> { showDeviceSetup = true }
                         preparationState is VinternEngine.PreparationState.Failed ->
                             VinternEngine.prepare(context, retry = true)
-                        aiReady -> requestVintern(VinternEngine.Mode.DESCRIBE)
+                        aiReady -> requestCapture(VinternEngine.Mode.DESCRIBE)
                     }
                 },
                 enabled = !vinternBusy && !modelDownloading &&
@@ -1502,61 +1380,16 @@ fun VietAssistScreen() {
                         vinternBusy -> "AI ĐANG PHÂN TÍCH..."
                         preparationState is VinternEngine.PreparationState.Failed -> "THỬ CHUẨN BỊ AI LẠI"
                         !aiReady -> "ĐANG CHUẨN BỊ AI…"
-                        else -> "CHỤP VÀ MÔ TẢ CHI TIẾT"
+                        else -> "CHỤP · MÔ TẢ XUNG QUANH"
                     },
                     fontSize = 16.sp
                 )
             }
 
-            ReadingActions(
-                aiReady = modelReady && aiReady, busy = vinternBusy,
-                onQuickRead = { startQuickReading() },
-                onDetailedRead = { requestVintern(VinternEngine.Mode.READ) }
-            )
-
-            // NÚT ĐIỀU KHIỂN
-            Button(
-                onClick = {
-                    if (vinternBusy) {
-                        stopVintern()
-                    } else if (vinternSnapshot != null) {
-                        vinternSnapshot = null
-                        vinternStatus = ""
-                    } else if (cameraStarted) {
-                        cameraStarted = false
-                        readingMode = false
-                        detectedText = "Đã tạm dừng quan sát"
-                    } else if (hasPermission) {
-                        detectedText = "Đang mở camera để quan sát trực tiếp..."
-                        cameraStarted = true
-
-                    } else {
-                        permissionLauncher.launch(
-                            Manifest.permission.CAMERA
-                        )
-                    }
-                },
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .heightIn(min = 58.dp),
-                shape = RoundedCornerShape(18.dp),
-                colors = ButtonDefaults.buttonColors(
-                    containerColor = accentGreen,
-                    contentColor = deepGreen
-                )
-            ) {
-                Text(
-                    text = if (vinternBusy) {
-                        "DỪNG PHÂN TÍCH ẢNH"
-                    } else if (vinternSnapshot != null) {
-                        "TRỞ LẠI CAMERA"
-                    } else if (cameraStarted) {
-                        "TẠM DỪNG QUAN SÁT TRỰC TIẾP"
-                    } else {
-                        "QUAN SÁT TRỰC TIẾP"
-                    },
-                    fontSize = 16.sp
-                )
+            if (vinternBusy) {
+                OutlinedButton(onClick = { stopVintern() }, modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)) {
+                    Text("Dừng phân tích")
+                }
             }
 
             Text(
@@ -1710,479 +1543,11 @@ fun VoiceCommandListener(
     }
 }
 
-@Composable
-fun CameraPreview(
-    modifier: Modifier = Modifier,
-    ocrEnabled: Boolean,
-    ocrCaptureRequest: Int,
-    onDetection: (String) -> Unit,
-    analysisPaused: Boolean = false,
-    vinternCaptureRequest: Int = 0,
-    onVinternFrame: (Long, Bitmap) -> Unit = { _, frame -> frame.recycle() }
-) {
-    val context = LocalContext.current
-    val lifecycleOwner = LocalLifecycleOwner.current
-    val executor = remember { Executors.newSingleThreadExecutor() }
-    val mainExecutor = remember(context) {
-        ContextCompat.getMainExecutor(context)
-    }
-    val cameraProviderRef = remember {
-        arrayOfNulls<ProcessCameraProvider>(1)
-    }
-    val disposed = remember { java.util.concurrent.atomic.AtomicBoolean(false) }
-    val latestOnDetection by rememberUpdatedState(onDetection)
-    val publishDetection: (String) -> Unit = remember {
-        { result -> if (!disposed.get()) latestOnDetection(result) }
-    }
-    val lastAnalysisAt = remember { AtomicLong(0L) }
-    val lastOcrAt = remember { AtomicLong(0L) }
-    val currentOcrEnabled by rememberUpdatedState(ocrEnabled)
-    // Mỗi lần vào/thoát chế độ đọc hoặc yêu cầu chụp lại, tăng thế hệ OCR.
-    // Kết quả bất đồng bộ của khung hình cũ sẽ bị bỏ qua.
-    val ocrRequestGeneration = remember { AtomicLong(0L) }
-
-    // Khi số yêu cầu Vintern tăng, analyzer gửi một bản sao khung hình kế tiếp.
-    // Trong lúc Vintern phân tích, tạm dừng EfficientDet/ML Kit để nhường CPU.
-    val currentAnalysisPaused by rememberUpdatedState(analysisPaused)
-    val latestOnVinternFrame by rememberUpdatedState(onVinternFrame)
-    val vinternRequested = remember { AtomicLong(0L) }
-    val vinternHandled = remember { AtomicLong(0L) }
-    LaunchedEffect(vinternCaptureRequest) {
-        vinternRequested.set(vinternCaptureRequest.toLong())
-    }
-
-    val ocrInProgress = remember {
-        java.util.concurrent.atomic.AtomicBoolean(false)
-    }
-
-// Lưu kết quả OCR đang thử xác nhận.
-    val ocrCandidateText = remember {
-        java.util.concurrent.atomic.AtomicReference("")
-    }
-
-    val ocrCandidateCount = remember {
-        AtomicLong(0L)
-    }
-
-// Khi đã chốt được văn bản thì dừng OCR tự động.
-    val ocrCaptured = remember {
-        java.util.concurrent.atomic.AtomicBoolean(false)
-    }
-
-// Khai báo các biến trước khi sử dụng chúng.
-    val latestObjectText = remember {
-        java.util.concurrent.atomic.AtomicReference(
-            "Chưa phát hiện vật thể rõ ràng"
-        )
-    }
-
-    val latestOcrText = remember {
-        java.util.concurrent.atomic.AtomicReference("")
-    }
-
-// Đặt LaunchedEffect sau phần khai báo latestOcrText.
-    LaunchedEffect(ocrEnabled, ocrCaptureRequest) {
-        val requestGeneration = ocrRequestGeneration.incrementAndGet()
-        if (ocrEnabled) {
-            latestOcrText.set("")
-            ocrCandidateText.set("")
-            ocrCandidateCount.set(0L)
-            ocrCaptured.set(false)
-
-            // Nếu không tìm thấy chữ, báo bằng giọng nói thay vì chờ vô hạn.
-            kotlinx.coroutines.delay(6500L)
-            if (
-                currentOcrEnabled &&
-                requestGeneration == ocrRequestGeneration.get() &&
-                ocrCaptured.compareAndSet(false, true)
-            ) {
-                publishDetection(
-                    "OCR_STATUS:Tôi chưa đọc được chữ rõ ràng. " +
-                            "Hãy đưa phần chữ vào giữa khung hình, tăng ánh sáng rồi nói nhận diện lại."
-                )
-            }
-        } else {
-            ocrCaptured.set(false)
-            latestOcrText.set("")
-        }
-    }
-
-
-    val textRecognizer = remember(context) {
-        TextRecognition.getClient(
-            TextRecognizerOptions.DEFAULT_OPTIONS
-        )
-    }
-
-    // Tải model một lần khi CameraPreview được tạo.
-    val objectDetector = remember(context) {
-        try {
-            ObjectDetector.createFromFile(
-                context,
-                "efficientdet-lite0.tflite"
-            )
-        } catch (error: Exception) {
-            Log.e(
-                "LUMORA_TFLITE",
-                "Không tải được efficientdet-lite0.tflite",
-                error
-            )
-            null
-        }
-    }
-
-    DisposableEffect(Unit) {
-        onDispose {
-            disposed.set(true)
-            ocrRequestGeneration.incrementAndGet()
-            cameraProviderRef[0]?.unbindAll()
-            cameraProviderRef[0] = null
-            // Đợi các tác vụ analyzer đã xếp hàng xong trước khi đóng detector.
-            executor.execute {
-                try { textRecognizer.close() } finally { objectDetector?.close() }
-            }
-            executor.shutdown()
-        }
-    }
-
-    AndroidView(
-        modifier = modifier,
-        factory = { viewContext ->
-            val previewView = PreviewView(viewContext)
-            previewView.scaleType = PreviewView.ScaleType.FILL_CENTER
-
-            val providerFuture =
-                ProcessCameraProvider.getInstance(viewContext)
-
-            providerFuture.addListener({
-                try {
-                    val provider = providerFuture.get()
-                    if (disposed.get()) return@addListener
-                    cameraProviderRef[0] = provider
-
-                    val preview = Preview.Builder().build().also {
-                        it.surfaceProvider = previewView.surfaceProvider
-                    }
-
-
-                    val analysis = ImageAnalysis.Builder()
-                        .setTargetResolution(android.util.Size(1280, 720))
-                        .setBackpressureStrategy(
-                            ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST
-                        )
-                        .setOutputImageFormat(
-                            ImageAnalysis.OUTPUT_IMAGE_FORMAT_RGBA_8888
-                        )
-                        .build()
-
-                    analysis.setAnalyzer(executor) { imageProxy ->
-                        try {
-                            if (disposed.get()) return@setAnalyzer
-                            if (currentAnalysisPaused && vinternRequested.get() <= vinternHandled.get()) {
-                                return@setAnalyzer
-                            }
-                            val now = System.currentTimeMillis()
-
-                            // Giới hạn tần suất xử lý để giảm tải điện thoại.
-                            if (now - lastAnalysisAt.get() < 450L) {
-                                imageProxy.close()
-                                return@setAnalyzer
-                            }
-
-                            lastAnalysisAt.set(now)
-
-                            if (objectDetector == null) {
-                                mainExecutor.execute {
-                                    publishDetection("Không tải được model AI")
-                                }
-                                imageProxy.close()
-                                return@setAnalyzer
-                            }
-
-                            val bitmap = imageProxyToBitmap(imageProxy)
-                            val rotation =
-                                imageProxy.imageInfo.rotationDegrees
-
-                            val rotatedBitmap = if (rotation == 0) {
-                                bitmap
-                            } else {
-                                val matrix = Matrix().apply {
-                                    postRotate(rotation.toFloat())
-                                }
-
-                                Bitmap.createBitmap(
-                                    bitmap,
-                                    0,
-                                    0,
-                                    bitmap.width,
-                                    bitmap.height,
-                                    matrix,
-                                    true
-                                ).also {
-                                    if (it !== bitmap) bitmap.recycle()
-                                }
-                            }
-
-                            try {
-                                val requestedFrame = vinternRequested.get()
-                                if (requestedFrame > vinternHandled.get()) {
-                                    vinternHandled.set(requestedFrame)
-                                    val frame = rotatedBitmap.copy(Bitmap.Config.ARGB_8888, false)
-                                    mainExecutor.execute {
-                                        if (disposed.get()) frame.recycle()
-                                        else latestOnVinternFrame(requestedFrame, frame)
-                                    }
-                                }
-                                if (currentAnalysisPaused) return@setAnalyzer
-
-                                // PHẦN 1: Nhận diện vật thể EfficientDet.
-                                val image = TensorImage.fromBitmap(
-                                    rotatedBitmap
-                                )
-                                val detections = objectDetector.detect(image)
-
-                                // Lấy cả nhãn, độ tin cậy và vị trí khung bao.
-                                // Vị trí/kích thước chỉ là ước lượng tương đối trong ảnh,
-                                // không phải khoảng cách hay kích thước thật ngoài đời.
-                                val result = detections
-                                    .flatMap { detection ->
-                                        val box = detection.boundingBox
-                                        val centerX = box.centerX() / rotatedBitmap.width.toFloat()
-                                        val centerY = box.centerY() / rotatedBitmap.height.toFloat()
-                                        val areaRatio =
-                                            (box.width() * box.height()) /
-                                                    (rotatedBitmap.width.toFloat() * rotatedBitmap.height.toFloat())
-
-                                        val horizontalPosition = when {
-                                            centerX < 0.15f -> "sát mép trái"
-                                            centerX < 0.35f -> "hơi lệch trái"
-                                            centerX > 0.85f -> "sát mép phải"
-                                            centerX > 0.65f -> "hơi lệch phải"
-                                            else -> "gần giữa khung hình"
-                                        }
-                                        val verticalPosition = when {
-                                            centerY < 0.33f -> "vùng trên khung hình"
-                                            centerY > 0.67f -> "vùng dưới khung hình"
-                                            else -> ""
-                                        }
-                                        val position = buildString {
-                                            append("trong tầm nhìn phía trước, ")
-                                            append(horizontalPosition)
-                                            if (verticalPosition.isNotBlank()) {
-                                                append(", ")
-                                                append(verticalPosition)
-                                            }
-                                        }
-                                        val relativeSize = when {
-                                            areaRatio >= 0.22f -> "kích thước lớn trong ảnh"
-                                            areaRatio >= 0.07f -> "kích thước vừa trong ảnh"
-                                            else -> "kích thước nhỏ trong ảnh"
-                                        }
-
-                                        detection.categories.mapNotNull { category ->
-                                            val label = category.label
-                                            val score = category.score
-
-                                            if (label.isBlank() || score < 0.35f) {
-                                                null
-                                            } else {
-                                                "$label (${(score * 100).toInt()}%) [$position | $relativeSize]"
-                                            }
-                                        }
-                                    }
-                                    .distinct()
-                                    .take(4)
-                                    .joinToString("; ")
-                                    .ifBlank {
-                                        "Chưa phát hiện vật thể rõ ràng"
-                                    }
-
-                                latestObjectText.set(result)
-
-                                // Hiển thị vật thể và chữ đã nhận diện.
-                                val previousOcr = latestOcrText.get()
-
-                                val currentDisplay =
-                                    if (previousOcr.isNotBlank()) {
-                                        "$result\nVăn bản: $previousOcr"
-                                    } else {
-                                        result
-                                    }
-
-                                // Khi đọc tài liệu, không cập nhật kết quả mỗi khung hình.
-// Tránh làm gián đoạn bộ đếm thời gian đọc giọng nói.
-// EfficientDet vẫn chạy bình thường.
-                                if (!currentOcrEnabled) {
-                                    mainExecutor.execute {
-                                        publishDetection(currentDisplay)
-                                    }
-                                }
-
-                                // PHẦN 2: OCR khoảng mỗi 1,8 giây.
-                                val ocrNow = System.currentTimeMillis()
-
-                                if (
-                                    currentOcrEnabled &&
-                                    !ocrCaptured.get() &&
-                                    ocrNow - lastOcrAt.get() >= 800L &&
-                                    ocrInProgress.compareAndSet(
-                                        false,
-                                        true
-                                    )
-                                ) {
-                                    lastOcrAt.set(ocrNow)
-                                    val ocrGenerationAtStart = ocrRequestGeneration.get()
-
-                                    val ocrBitmap = createOcrContrastBitmap(rotatedBitmap)
-
-                                    if (ocrBitmap == null) {
-                                        ocrInProgress.set(false)
-                                    } else {
-                                        try {
-                                            textRecognizer.process(
-                                                InputImage.fromBitmap(
-                                                    ocrBitmap,
-                                                    0
-                                                )
-                                            )
-
-
-                                                .addOnSuccessListener(mainExecutor) { visionText ->
-                                                    if (disposed.get()) return@addOnSuccessListener
-                                                    val recognizedText = visionText.text
-                                                        .trim()
-                                                        .take(1000)
-
-                                                    Log.d(
-                                                        "LUMORA_OCR",
-                                                        "Ảnh OCR: ${ocrBitmap.width}x${ocrBitmap.height}"
-                                                    )
-                                                    Log.d(
-                                                        "LUMORA_OCR",
-                                                        "OCR: ${recognizedText.length} ký tự"
-                                                    )
-
-                                                    if (
-                                                        recognizedText.isNotBlank() &&
-                                                        currentOcrEnabled &&
-                                                        ocrGenerationAtStart == ocrRequestGeneration.get()
-                                                    ) {
-                                                        // Đọc ngay khi có kết quả chữ đầu tiên để tránh chờ
-                                                        // nhiều vòng xác nhận. Có thể yêu cầu "nhận diện lại" để thử lại.
-                                                        if (
-                                                            currentOcrEnabled &&
-                                                            ocrGenerationAtStart == ocrRequestGeneration.get() &&
-                                                            ocrCaptured.compareAndSet(false, true)
-                                                        ) {
-                                                            latestOcrText.set(recognizedText)
-                                                            val latestObject = latestObjectText.get()
-                                                            val combinedResult =
-                                                                "$latestObject\nVăn bản: $recognizedText"
-                                                            publishDetection(combinedResult)
-                                                            Log.d("LUMORA_OCR", "Đã nhận chữ và chuyển sang đọc")
-                                                        }
-                                                    } else {
-                                                        Log.d(
-                                                            "LUMORA_OCR",
-                                                            "Chưa thấy chữ hoặc chế độ đọc đã tắt"
-                                                        )
-                                                    }
-                                                }
-
-                                                .addOnFailureListener(
-                                                    mainExecutor
-                                                ) { error ->
-                                                    Log.w(
-                                                        "LUMORA_OCR",
-                                                        "Không nhận diện được chữ",
-                                                        error
-                                                    )
-                                                }
-                                                .addOnCompleteListener(
-                                                    mainExecutor
-                                                ) {
-                                                    if (!ocrBitmap.isRecycled) {
-                                                        ocrBitmap.recycle()
-                                                    }
-                                                    ocrInProgress.set(false)
-                                                }
-                                        } catch (ocrError: Exception) {
-                                            if (!ocrBitmap.isRecycled) {
-                                                ocrBitmap.recycle()
-                                            }
-
-                                            ocrInProgress.set(false)
-
-                                            Log.e(
-                                                "LUMORA_OCR",
-                                                "Lỗi khi khởi chạy OCR",
-                                                ocrError
-                                            )
-                                        }
-                                    }
-                                }
-                            } catch (error: Exception) {
-                                Log.e(
-                                    "LUMORA_TFLITE",
-                                    "Lỗi phân tích ảnh bằng EfficientDet",
-                                    error
-                                )
-
-                                mainExecutor.execute {
-                                    publishDetection(
-                                        "AI gặp lỗi khi phân tích ảnh"
-                                    )
-                                }
-                            } finally {
-                                if (!rotatedBitmap.isRecycled) {
-                                    rotatedBitmap.recycle()
-                                }
-                            }
-                        } catch (error: Exception) {
-                            Log.e(
-                                "LUMORA_TFLITE",
-                                "Không chuyển được khung hình camera",
-                                error
-                            )
-                            mainExecutor.execute {
-                                publishDetection(
-                                    "Không xử lý được hình ảnh camera"
-                                )
-                            }
-                        } finally {
-                            imageProxy.close()
-                        }
-                    }
-
-                    provider.unbindAll()
-                    provider.bindToLifecycle(
-                        lifecycleOwner,
-                        CameraSelector.DEFAULT_BACK_CAMERA,
-                        preview,
-                        analysis
-                    )
-                } catch (error: Exception) {
-                    Log.e(
-                        "LUMORA_TFLITE",
-                        "Không thể khởi động camera hoặc AI",
-                        error
-                    )
-                    mainExecutor.execute {
-                        publishDetection("Không thể khởi động camera/AI")
-                    }
-                }
-            }, mainExecutor)
-
-            previewView
-        }
-    )
-}
-
 /**
  * Chuyển CameraX RGBA_8888 ImageProxy thành Bitmap,
  * có xử lý rowStride/pixelStride.
  */
-private fun imageProxyToBitmap(
+internal fun imageProxyToBitmap(
     imageProxy: ImageProxy
 ): Bitmap {
     val plane = imageProxy.planes[0]
@@ -2223,21 +1588,7 @@ private fun imageProxyToBitmap(
 }
 
 fun translateDetectionForSpeech(raw: String): String? {
-    if (raw.startsWith("OCR_STATUS:")) {
-        return raw
-    }
     val normalized = raw.trim().lowercase()
-
-    // Ưu tiên đọc chữ OCR nếu camera nhận diện được.
-    val ocrMatch = Regex(
-        "(?s)Văn bản:\\s*(.*)$"
-    ).find(raw)
-
-    val ocrText = ocrMatch?.groupValues?.get(1)?.trim()
-
-    if (!ocrText.isNullOrBlank()) {
-        return "Nội dung nhận diện được như sau: $ocrText"
-    }
 
     val ignoredMessages = listOf(
         "chưa phát hiện vật thể",

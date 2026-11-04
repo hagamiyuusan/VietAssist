@@ -29,6 +29,8 @@ fun DeviceSetupScreen(
     onRefresh: () -> Unit,
     onReadStatus: () -> Unit,
     onContinue: () -> Unit,
+    ocrBackend: OcrBackend = OcrBackend.ML_KIT,
+    onOcrBackendChange: (OcrBackend) -> Unit = {},
     alwaysListening: Boolean = false,
     onVoiceModeChange: (Boolean) -> Unit = {},
     preparationState: VinternEngine.PreparationState = VinternEngine.PreparationState.NotLoaded
@@ -43,7 +45,7 @@ fun DeviceSetupScreen(
         ) {
             Text("Thiết lập LUMORA", style = MaterialTheme.typography.headlineMedium,
                 modifier = Modifier.semantics { heading() })
-            Text("Kiểm tra máy và chuẩn bị AI mô tả, đọc chi tiết. Bạn có thể dùng nhận diện và đọc nhanh khi chưa có Vintern.")
+            Text("Kiểm tra máy và chuẩn bị AI mô tả, đọc chi tiết. Camera và nhận diện vật thể vẫn dùng được khi chưa có model.")
             val chip = if (Build.VERSION.SDK_INT >= 31) Build.SOC_MODEL else Build.HARDWARE
             Text("${Build.MANUFACTURER} ${Build.MODEL} · $chip", color = accent)
             HorizontalDivider(color = accent.copy(alpha = 0.3f))
@@ -61,11 +63,13 @@ fun DeviceSetupScreen(
             SetupRequirement("Dung lượng", "${gib(requirements.freeStorage)} GB trống. " +
                 if (modelReady) "Model đã có trên máy."
                 else "Cần thêm ${(requirements.requiredStorage + 1048575) / 1048576} MB để tải tiếp và dự phòng.")
+            SetupRequirement("Model đang dùng", "Vintern-1B-v3.5 · dùng để mô tả cảnh. OCR được chọn riêng bên dưới.")
             SetupRequirement("Cách chạy AI", "Vintern-1B-v3.5 dùng GPU OpenCL để xử lý ảnh; phần sinh câu trả lời dùng CPU hoặc GPU tùy chip. Cần Android 9 và driver OpenCL của hãng điện thoại; tương thích được kiểm tra khi chạy AI.")
             HorizontalDivider(color = accent.copy(alpha = 0.3f))
             SetupRequirement("Camera", if (cameraGranted) "Đã cấp quyền." else "Cần để nhận diện và đọc hình ảnh.")
             if (!cameraGranted) SetupButton("Cấp quyền camera", onCamera)
             VoiceModeSettings(alwaysListening, onVoiceModeChange)
+            OcrSettingsControl(ocrBackend, onOcrBackendChange)
             SetupRequirement("Micro", if (micGranted) "Đã cấp quyền." else "Tùy chọn: cần để điều khiển bằng giọng nói. Vẫn dùng được nút bấm.")
             if (!micGranted) SetupButton("Cấp quyền micro", onMicrophone)
             if (!cameraGranted || !micGranted) {
@@ -95,7 +99,7 @@ fun DeviceSetupScreen(
                     Text("Đọc tình trạng", color = accent)
                 }
             }
-            SetupButton(if (modelReady && blocker == null) "Tiếp tục sử dụng" else "Tiếp tục với nhận diện và đọc nhanh", onContinue)
+            SetupButton(if (modelReady && blocker == null) "Tiếp tục sử dụng" else "Tiếp tục với nhận diện vật thể", onContinue)
             Text("Bạn có thể mở lại màn hình này bằng nút Thiết lập trên màn hình chính.", color = accent)
         }
     }

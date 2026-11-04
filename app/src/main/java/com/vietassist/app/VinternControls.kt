@@ -35,27 +35,11 @@ fun VinternPreparationStatus(state: VinternEngine.PreparationState) {
         when (state) {
             VinternEngine.PreparationState.NotLoaded,
             VinternEngine.PreparationState.Preparing ->
-                Text("Đọc chữ nhanh vẫn dùng được trong lúc chờ.", color = accent,
+                Text("Camera và khung nhận diện vẫn dùng được trong lúc chờ.", color = accent,
                     style = MaterialTheme.typography.bodyMedium)
             is VinternEngine.PreparationState.Failed ->
                 Text(state.message, color = Color(0xFFFFD6A5), style = MaterialTheme.typography.bodyMedium)
             VinternEngine.PreparationState.Ready -> Unit
         }
-    }
-}
-
-@Composable
-fun ReadingActions(aiReady: Boolean, busy: Boolean, onQuickRead: () -> Unit, onDetailedRead: () -> Unit) {
-    Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-        Button(
-            onClick = onQuickRead, enabled = !busy,
-            modifier = Modifier.weight(1f).heightIn(min = 56.dp),
-            colors = ButtonDefaults.buttonColors(containerColor = Color(0xFFB5F5D2), contentColor = Color(0xFF071D17))
-        ) { Text("Đọc chữ nhanh") }
-        OutlinedButton(
-            onClick = onDetailedRead, enabled = aiReady && !busy,
-            modifier = Modifier.weight(1f).heightIn(min = 56.dp),
-            colors = ButtonDefaults.outlinedButtonColors(contentColor = Color(0xFFB5F5D2))
-        ) { Text("Đọc chi tiết AI") }
     }
 }

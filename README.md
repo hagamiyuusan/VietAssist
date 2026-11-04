@@ -4,13 +4,11 @@
 
 ## Các luồng xử lý
 
-- **Quan sát trực tiếp:** CameraX → EfficientDet → nhãn/vị trí vật thể → giọng đọc.
-- **Đọc chữ nhanh:** CameraX → ảnh OCR tăng tương phản → ML Kit Text Recognition → giọng đọc. Không cần Vintern. Nhận kết quả đầu tiên có chữ; nói “nhận diện lại” để lấy phần khác, “đọc lại” để nghe lại kết quả đã lưu.
-- **Chụp và mô tả chi tiết / đọc chi tiết AI (tùy chọn):** chụp một ảnh → đóng camera → Vintern → giọng đọc. Trên Adreno 735, GPU OpenCL xử lý ảnh và CPU sinh văn bản theo số đo trên thiết bị. “Trở lại camera” mở lại luồng quan sát.
+- **Camera trực tiếp:** luôn hiện sau khi cấp quyền camera. EfficientDet vẽ khung, nhãn và độ tin cậy của vật thể; tọa độ được chuyển sang preview qua cùng CameraX viewport, có xử lý xoay và crop.
+- **Chụp · mô tả xung quanh:** chụp một ảnh gửi Vintern. Camera tiếp tục phát; EfficientDet tạm dừng trong lúc xử lý để hạn chế tranh tài nguyên. Kết quả dưới camera thuộc ảnh vừa chụp; không thay preview bằng ảnh tĩnh.
+- **Đọc chữ:** ra lệnh “đọc văn bản”, “đọc tài liệu” hoặc “hãy đọc”. Luồng chụp dùng **OCR mặc định** trong Thiết lập: **ML Kit** (mặc định, không cần Vintern) hoặc **Vintern** (cần model sẵn sàng). Không tự đổi backend khi lỗi. “Đọc kỹ/đọc chi tiết” cũng dùng cùng lựa chọn OCR; không có hai nút đọc riêng trên màn hình chính.
 
-Khi chưa tải model, nút “Bật mô tả chi tiết” mở Thiết lập để người dùng chủ động chọn tải AI nâng cao. Các chức năng quan sát trực tiếp và OCR nhanh không cần Vintern.
-
-Các lệnh “đọc văn bản”, “đọc tài liệu”, “hãy đọc” dùng OCR nhanh. “Đọc chi tiết”, “đọc kỹ” dùng Vintern.
+`OcrSettings` là nguồn duy nhất cho lựa chọn OCR. Mỗi lượt đọc giữ lựa chọn tại thời điểm bắt đầu; thay đổi Settings không làm đổi backend của lượt đang xử lý. “Đọc lại” đọc kết quả chữ đã lưu; “chụp lại/nhận diện lại” dùng lựa chọn hiện tại để lấy ảnh mới. Các lệnh tạm dừng quan sát chỉ dừng nhận diện vật thể, camera vẫn hiển thị.
 
 ## Điều khiển bằng giọng nói
 
@@ -23,7 +21,7 @@ Trong **Thiết lập → Điều khiển bằng giọng nói**, chọn:
 
 ## Tải model và chuẩn bị AI
 
-Tải đủ file chỉ có nghĩa là model đã nằm trên bộ nhớ lưu trữ. Khi mở ứng dụng, engine nạp model vào RAM và chạy một ảnh đen tổng hợp để chuẩn bị các kernel trước khi công bố **AI đã sẵn sàng**. Giao diện hiển thị trạng thái chuẩn bị; OCR nhanh vẫn sử dụng được trong lúc chờ.
+Tải đủ file chỉ có nghĩa là model đã nằm trên bộ nhớ lưu trữ. Khi mở ứng dụng, engine nạp model vào RAM và chạy một ảnh đen tổng hợp để chuẩn bị các kernel trước khi công bố **AI đã sẵn sàng**. Giao diện hiển thị trạng thái chuẩn bị; OCR vẫn sử dụng được trong lúc chờ nếu chọn ML Kit.
 
 Engine thuộc tiến trình ứng dụng, được dùng lại khi đổi hoặc mở lại Activity. Đóng màn hình không chủ động giải phóng model. Nếu Android kết thúc tiến trình, lần mở tiếp theo cần chuẩn bị lại. Đây là đánh đổi RAM để giảm thời gian chờ khi sử dụng AI.
 
@@ -38,7 +36,7 @@ bash ./gradlew :app:assembleDebug :app:assembleDebugAndroidTest \
   :app:testDebugUnitTest :app:lintDebug -Pandroid.injected.build.abi=arm64-v8a
 ```
 
-APK debug hiện được tạo tại `app/build/intermediates/apk/debug/app-debug.apk`. Kiểm thử suy luận cần điện thoại có driver OpenCL và hai file Vintern đã tải. `VinternDeviceTest` kiểm tra chuẩn bị/làm nóng, hủy yêu cầu đang xếp hàng, tái sử dụng model và đọc ảnh tổng hợp. Các kiểm thử Compose kiểm tra trạng thái chuẩn bị và khóa đúng thao tác AI, giữ OCR nhanh khả dụng.
+APK debug hiện được tạo tại `app/build/intermediates/apk/debug/app-debug.apk`. Kiểm thử suy luận cần điện thoại có driver OpenCL và hai file Vintern đã tải. `VinternDeviceTest` kiểm tra chuẩn bị/làm nóng, hủy yêu cầu đang xếp hàng, tái sử dụng model và đọc ảnh tổng hợp. Các kiểm thử Compose kiểm tra trạng thái chuẩn bị, lựa chọn OCR và lưu cài đặt. Kiểm thử ảnh tổng hợp kiểm tra đọc ML Kit và phép ánh xạ khung vào preview.
 
 ## Lịch sử Git
 

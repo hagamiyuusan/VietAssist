@@ -31,7 +31,7 @@ class DeviceSetupScreenTest {
     @Test fun unsupportedDeviceBlocksDownloadButKeepsBasicUse() {
         show(nativePresent = false)
         compose.onNodeWithText("Tải mô hình AI").performScrollTo().assertIsNotEnabled()
-        compose.onNodeWithText("Tiếp tục với nhận diện và đọc nhanh").performScrollTo().performClick()
+        compose.onNodeWithText("Tiếp tục với nhận diện vật thể").performScrollTo().performClick()
         assertEquals(0, downloads)
         assertEquals(1, continues)
     }
