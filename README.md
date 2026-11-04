@@ -4,9 +4,11 @@
 
 ## Các luồng xử lý
 
-- **Quan sát:** CameraX → EfficientDet → nhãn/vị trí vật thể → giọng đọc.
+- **Quan sát trực tiếp:** CameraX → EfficientDet → nhãn/vị trí vật thể → giọng đọc.
 - **Đọc chữ nhanh:** CameraX → ảnh OCR tăng tương phản → ML Kit Text Recognition → giọng đọc. Không cần Vintern. Nhận kết quả đầu tiên có chữ; nói “nhận diện lại” để lấy phần khác, “đọc lại” để nghe lại kết quả đã lưu.
-- **Mô tả ảnh / đọc chi tiết AI:** chụp một ảnh → đóng camera → Vintern → giọng đọc. Trên Adreno 735, GPU OpenCL xử lý ảnh và CPU sinh văn bản theo số đo trên thiết bị. “Trở lại camera” mở lại luồng quan sát.
+- **Chụp và mô tả chi tiết / đọc chi tiết AI (tùy chọn):** chụp một ảnh → đóng camera → Vintern → giọng đọc. Trên Adreno 735, GPU OpenCL xử lý ảnh và CPU sinh văn bản theo số đo trên thiết bị. “Trở lại camera” mở lại luồng quan sát.
+
+Khi chưa tải model, nút “Bật mô tả chi tiết” mở Thiết lập để người dùng chủ động chọn tải AI nâng cao. Các chức năng quan sát trực tiếp và OCR nhanh không cần Vintern.
 
 Các lệnh “đọc văn bản”, “đọc tài liệu”, “hãy đọc” dùng OCR nhanh. “Đọc chi tiết”, “đọc kỹ” dùng Vintern.
 

@@ -371,7 +371,7 @@ fun VietAssistScreen() {
                     "Nói bắt đầu quan sát để nhận biết vật thể xung quanh. " +
                     "Nói đọc văn bản để đọc sách hoặc tài liệu. " +
                     "Nói nhận diện lại để đọc phần chữ khác. " +
-                    "Nói mô tả xung quanh để AI mô tả cảnh trước mặt, " +
+                    "Nói chụp và mô tả chi tiết để AI phân tích một ảnh trước mặt, " +
                     "hoặc đọc chi tiết để AI đọc kỹ tài liệu. " +
                     "Lần đầu dùng hai lệnh này, hãy nói tải mô hình khi có Wi-Fi. " +
                     "Nói tạm dừng quan sát để dừng camera. " +
@@ -852,7 +852,7 @@ fun VietAssistScreen() {
         val request = vinternRun.incrementAndGet()
         vinternSnapshot = null
         vinternStatus = if (mode == VinternEngine.Mode.DESCRIBE) {
-            "AI đang quan sát và mô tả..."
+            "Đang chụp ảnh để mô tả chi tiết..."
         } else {
             "AI đang đọc chi tiết..."
         }
@@ -1098,7 +1098,7 @@ fun VietAssistScreen() {
 
             command.contains("quay lại quan sát") ||
                     command.contains("bắt đầu quan sát") ||
-                    command == "quan sát" -> {
+                    command == "quan sát" || command == "quan sát trực tiếp" -> {
                 readingMode = false
                 if (hasPermission) {
                     cameraStarted = true
@@ -1288,7 +1288,7 @@ fun VietAssistScreen() {
                         } else if (cameraStarted && readingMode) {
                             "ĐỌC CHỮ NHANH"
                         } else if (cameraStarted) {
-                            "CAMERA ĐANG MỞ"
+                            "QUAN SÁT TRỰC TIẾP"
                         } else {
                             "CAMERA TẠM DỪNG"
                         },
@@ -1471,11 +1471,14 @@ fun VietAssistScreen() {
 
             if (modelReady && !vinternBusy) VinternPreparationStatus(preparationState)
 
-            // NÚT AI MÔ TẢ (Vintern); khi chưa có mô hình thì nút này dùng để tải mô hình.
+            Text(
+                "AI nâng cao tùy chọn · chụp một ảnh để mô tả chi tiết.",
+                color = accentGreen, fontSize = 12.sp
+            )
             Button(
                 onClick = {
                     when {
-                        !modelReady -> startModelDownload()
+                        !modelReady -> { showDeviceSetup = true }
                         preparationState is VinternEngine.PreparationState.Failed ->
                             VinternEngine.prepare(context, retry = true)
                         aiReady -> requestVintern(VinternEngine.Mode.DESCRIBE)
@@ -1495,11 +1498,11 @@ fun VietAssistScreen() {
                 Text(
                     text = when {
                         modelDownloading -> "ĐANG TẢI MÔ HÌNH AI $modelDownloadPercent%"
-                        !modelReady -> "TẢI MÔ HÌNH AI (${VinternModelManager.totalBytes / (1024 * 1024)} MB)"
+                        !modelReady -> "BẬT MÔ TẢ CHI TIẾT"
                         vinternBusy -> "AI ĐANG PHÂN TÍCH..."
                         preparationState is VinternEngine.PreparationState.Failed -> "THỬ CHUẨN BỊ AI LẠI"
                         !aiReady -> "ĐANG CHUẨN BỊ AI…"
-                        else -> "AI MÔ TẢ XUNG QUANH"
+                        else -> "CHỤP VÀ MÔ TẢ CHI TIẾT"
                     },
                     fontSize = 16.sp
                 )
@@ -1524,7 +1527,7 @@ fun VietAssistScreen() {
                         readingMode = false
                         detectedText = "Đã tạm dừng quan sát"
                     } else if (hasPermission) {
-                        detectedText = "Đang khởi động AI..."
+                        detectedText = "Đang mở camera để quan sát trực tiếp..."
                         cameraStarted = true
 
                     } else {
@@ -1548,9 +1551,9 @@ fun VietAssistScreen() {
                     } else if (vinternSnapshot != null) {
                         "TRỞ LẠI CAMERA"
                     } else if (cameraStarted) {
-                        "TẠM DỪNG QUAN SÁT"
+                        "TẠM DỪNG QUAN SÁT TRỰC TIẾP"
                     } else {
-                        "BẮT ĐẦU QUAN SÁT"
+                        "QUAN SÁT TRỰC TIẾP"
                     },
                     fontSize = 16.sp
                 )
