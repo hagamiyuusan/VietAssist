@@ -67,6 +67,10 @@ object VinternEngine {
         )
     }
 
+    // Fixed task instructions. LightOn transcription is image-only, as trained upstream.
+    internal fun defaultPrompt(model: VisionModel, mode: Mode): String =
+        if (model == VisionModel.LIGHTON) "" else mode.question
+
     sealed class Result {
         data class Success(val text: String) : Result()
         object ModelMissing : Result()
@@ -132,7 +136,7 @@ object VinternEngine {
                     if (request != cancellation.get()) return@withContext Result.Cancelled
                     activeCancellation = cancellation
                     val output = try {
-                        VinternNative.nativeGenerate(rgb, width, height, if (model == VisionModel.LIGHTON) "" else mode.question,
+                        VinternNative.nativeGenerate(rgb, width, height, defaultPrompt(model, mode),
                             if (model == VisionModel.LIGHTON) 2048 else mode.maxTokens)
                     } finally {
                         activeCancellation = null

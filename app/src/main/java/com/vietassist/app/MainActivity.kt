@@ -217,14 +217,6 @@ fun VietAssistScreen() {
         translateDetectionForSpeech(detectedText)
     }
 
-    var lastSpokenText by remember {
-        mutableStateOf("")
-    }
-
-    var lastSpokenAt by remember {
-        mutableStateOf(0L)
-    }
-
     // Nội dung đọc bởi model đã cấu hình, dùng lại cho lệnh đọc lại.
     var lastReadText by remember {
         mutableStateOf("")
@@ -235,7 +227,6 @@ fun VietAssistScreen() {
     var ttsSpeaking by remember { mutableStateOf(false) }
     var activeUtteranceId by remember { mutableStateOf<String?>(null) }
     var ignoreVoiceEcho by remember { mutableStateOf(false) }
-    var speechCompletionTick by remember { mutableStateOf(0) }
 
     var ttsReload by remember { mutableIntStateOf(0) }
     val speechLifecycle = LocalLifecycleOwner.current
@@ -389,7 +380,6 @@ fun VietAssistScreen() {
                         activeUtteranceId = null
                         ttsSpeaking = false
                         if (failed) showVoiceNotice("Không phát được giọng đọc. Mở Thiết lập để kiểm tra giọng Việt.")
-                        speechCompletionTick++
                         ignoreVoiceEcho = true
                         Handler(Looper.getMainLooper()).postDelayed({
                             if (!ttsSpeaking && activeUtteranceId == null) {
@@ -493,54 +483,6 @@ fun VietAssistScreen() {
                     "lumora_wake_reply"
                 )
             }
-        }
-    }
-
-    LaunchedEffect(
-        speechText,
-        ttsReady,
-        onboardingSpeaking,
-        onboardingWaiting,
-        speechCompletionTick,
-        vinternBusy,
-        hasCapturedResult,
-        showDeviceSetup
-    ) {
-        val message = speechText ?: return@LaunchedEffect
-        if (showDeviceSetup || !ttsReady || message.isBlank()) return@LaunchedEffect
-        // Trong lúc AI phân tích ảnh, không chen thông báo vật thể vào.
-        if (vinternBusy || hasCapturedResult) return@LaunchedEffect
-
-        // Debounce các cập nhật khung hình liên tiếp; chỉ lấy kết quả mới nhất.
-        kotlinx.coroutines.delay(220)
-
-        if (onboardingSpeaking || onboardingWaiting || message == lastSpokenText) return@LaunchedEffect
-
-        // Không bao giờ dùng QUEUE_FLUSH để cắt ngang một câu tự động đang phát.
-        // Một số TTS báo isSpeaking chậm hơn callback, nên chờ ngắn rồi kiểm tra lại.
-        if (ttsSpeaking || ttsEngine?.isSpeaking == true) {
-            kotlinx.coroutines.delay(180)
-            if (ttsSpeaking || ttsEngine?.isSpeaking == true) return@LaunchedEffect
-        }
-
-        val remaining = 1800L - (System.currentTimeMillis() - lastSpokenAt)
-        if (remaining > 0L) kotlinx.coroutines.delay(remaining)
-
-        if (ttsSpeaking || ttsEngine?.isSpeaking == true) {
-            kotlinx.coroutines.delay(180)
-            if (ttsSpeaking || ttsEngine?.isSpeaking == true) return@LaunchedEffect
-        }
-        val now = System.currentTimeMillis()
-        val result = speakMessage(
-            message,
-            TextToSpeech.QUEUE_FLUSH,
-            null,
-            "lumora_auto_${now}"
-        )
-
-        if (result == TextToSpeech.SUCCESS) {
-            lastSpokenText = message
-            lastSpokenAt = now
         }
     }
 
@@ -748,6 +690,18 @@ fun VietAssistScreen() {
         }
     }
 
+    fun stopVintern() {
+        vinternCancelled = true
+        hasCapturedResult = false
+        VinternEngine.cancel(vinternCancellation)
+        // Invalidate every phase, including an inference already running on the worker.
+        vinternRun.incrementAndGet()
+        vinternAwaitingFrame = false
+        vinternCaptureRequest = 0
+        vinternBusy = false
+        vinternStatus = ""
+    }
+
     fun requestCapture(mode: VinternEngine.Mode) {
         val model = localModelFor(mode, ocrSettings.backend.value)
         if (model != null) {
@@ -771,6 +725,9 @@ fun VietAssistScreen() {
             }
             // Analyze prepares the requested model on the shared executor.
             // Switching OCR/description must not be blocked by the other model's state.
+        }
+        if (vinternBusy && mode == VinternEngine.Mode.READ && vinternMode == VinternEngine.Mode.DESCRIBE) {
+            stopVintern()
         }
         if (vinternBusy) {
             speakMessage(
@@ -900,19 +857,6 @@ fun VietAssistScreen() {
         }
     }
 
-    fun stopVintern() {
-        vinternCancelled = true
-        hasCapturedResult = false
-        if (vinternBusy) vinternStatus = "Đang dừng phân tích ảnh..."
-        VinternEngine.cancel(vinternCancellation)
-        if (vinternAwaitingFrame) {
-            vinternRun.incrementAndGet()
-            vinternAwaitingFrame = false
-            vinternBusy = false
-            vinternStatus = ""
-        }
-    }
-
     fun handleVoiceCommand(spoken: String) {
         val command = spoken.lowercase(Locale.forLanguageTag("vi-VN"))
             .replace(Regex("[^\\p{L}\\p{N}\\s]"), " ")
@@ -975,7 +919,6 @@ fun VietAssistScreen() {
                     Handler(Looper.getMainLooper()).postDelayed({
                         if (!ttsSpeaking && activeUtteranceId == null) ignoreVoiceEcho = false
                     }, 650L)
-                    speechCompletionTick++
                     speakMessage(
                         "Đã dừng đọc. Bạn có thể nói đọc lại hoặc nhận diện lại.",
                         TextToSpeech.QUEUE_FLUSH,
@@ -1494,7 +1437,9 @@ fun VoiceCommandListener(
                         current.destroy()
                         if (recognizer === current) recognizer = null
                         if (command != null) latestOnCommand(command)
-                        else if (reportError) latestOnSessionFinished(error)
+                        if (ownerActive() && generation == request && reportError && (command == null || !continuous)) {
+                            latestOnSessionFinished(error)
+                        }
                         if (continuous && ownerActive() && generation == request && error !in setOf(9, 12, 13)) {
                             handler.postDelayed(this, if (error in setOf(5, 11)) 1200L else 900L)
                         }

@@ -26,7 +26,6 @@ fun OcrSettingsControl(backend: OcrBackend, onSelect: (OcrBackend) -> Unit) {
         }
         Text(when (backend) {
             OcrBackend.ML_KIT -> "Đọc chữ bằng ML Kit, không cần tải model AI. Nói “đọc văn bản” để chụp và đọc."
-            OcrBackend.VINTERN -> "Đọc chữ bằng Vintern. Cần tải và chuẩn bị model; không tự đổi bộ OCR khi lỗi."
             OcrBackend.LIGHTON -> "Đọc nguyên văn bằng LightOnOCR-3-0.8B. Cần tải model riêng; chất lượng tiếng Việt và tốc độ tùy ảnh, chưa được xác nhận trên tài liệu của bạn. Không tự đổi bộ OCR khi lỗi."
         })
     }

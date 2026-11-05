@@ -31,12 +31,17 @@ class OcrSettingsTest {
                 Surface { OcrSettingsControl(backend, settings::select) }
             }
             compose.onNodeWithText("ML Kit").assertIsSelected()
-            compose.onNodeWithText("Vintern").performClick().assertIsSelected()
-            assertEquals(OcrBackend.VINTERN, OcrSettings(context).backend.value)
+            compose.onNodeWithText("Vintern").assertDoesNotExist()
             compose.onNodeWithText("LightOnOCR 0.8B").performClick().assertIsSelected()
             assertEquals(OcrBackend.LIGHTON, OcrSettings(context).backend.value)
             compose.onNodeWithText("ML Kit").performClick().assertIsSelected()
             assertEquals(OcrBackend.ML_KIT, OcrSettings(context).backend.value)
+            context.getSharedPreferences("lumora_ocr", 0).edit().putString("backend", "VINTERN").commit()
+            assertEquals(OcrBackend.ML_KIT, OcrSettings(context).backend.value)
+            assertEquals("ML_KIT", context.getSharedPreferences("lumora_ocr", 0).getString("backend", null))
+            context.getSharedPreferences("lumora_ocr", 0).edit().putString("backend", "UNKNOWN").commit()
+            try { OcrSettings(context); fail("Unknown choices must not silently fall back") }
+            catch (_: IllegalArgumentException) { }
         } finally { app.deleteSharedPreferences(name) }
     }
     @Test fun mlKitReadsSyntheticTextAndReleasesImage() = runBlocking {
