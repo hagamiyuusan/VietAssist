@@ -16,14 +16,13 @@ class DeviceSetupScreenTest {
     private var continues = 0
     private var lightOnDownloads = 0
 
-    private fun show(nativePresent: Boolean, backend: OcrBackend = OcrBackend.ML_KIT) {
+    private fun show(nativePresent: Boolean, backend: OcrBackend = OcrBackend.LIGHTON, gpuPresent: Boolean = true) {
         compose.setContent {
             DeviceSetupScreen(
-                requirements = VinternRequirements(true, nativePresent, 8L shl 30, 3L shl 30, false, 2L shl 30, 1L shl 30),
-                cameraGranted = false, micGranted = false, modelReady = false,
-                downloading = false, progress = 0, status = "",
+                requirements = LightOnRequirements(true, nativePresent, 8L shl 30, 3L shl 30, false, 2L shl 30, 1L shl 30, gpuAvailable = gpuPresent),
+                cameraGranted = false, micGranted = false, status = "",
                 onCamera = {}, onMicrophone = {}, onSettings = {},
-                onDownload = { downloads++ }, onRefresh = {}, onReadStatus = {},
+                onRefresh = {}, onReadStatus = {},
                 onContinue = { continues++ },
                 ocrBackend = backend, onDownloadLightOn = { lightOnDownloads++ }
             )
@@ -32,7 +31,7 @@ class DeviceSetupScreenTest {
 
     @Test fun unsupportedDeviceBlocksDownloadButKeepsBasicUse() {
         show(nativePresent = false)
-        compose.onNodeWithText("Tải mô hình AI").performScrollTo().assertIsNotEnabled()
+        compose.onNodeWithText("Tải LightOnOCR").performScrollTo().assertIsNotEnabled()
         compose.onNodeWithText("Tiếp tục với nhận diện vật thể").performScrollTo().performClick()
         assertEquals(0, downloads)
         assertEquals(1, continues)
@@ -40,8 +39,8 @@ class DeviceSetupScreenTest {
 
     @Test fun supportedDeviceCanStartDownloadWithoutMicrophonePermission() {
         show(nativePresent = true)
-        compose.onNodeWithText("Tải mô hình AI").performScrollTo().assertIsEnabled().performClick()
-        assertEquals(1, downloads)
+        compose.onNodeWithText("Tải LightOnOCR").performScrollTo().assertIsEnabled().performClick()
+        assertEquals(1, lightOnDownloads)
     }
     @Test fun lightOnDownloadUsesItsOwnAction() {
         show(nativePresent = true, backend = OcrBackend.LIGHTON)
@@ -54,6 +53,14 @@ class DeviceSetupScreenTest {
         show(nativePresent = false, backend = OcrBackend.LIGHTON)
         compose.onNodeWithText("Tải LightOnOCR").performScrollTo().assertIsNotEnabled()
         assertEquals(0, lightOnDownloads)
+    }
+
+    @Test fun missingGpuBlocksLightOnDespiteNativeLibrary() {
+        show(nativePresent = true, gpuPresent = false)
+        compose.onNodeWithText("Tải LightOnOCR").performScrollTo().assertIsNotEnabled()
+        assertEquals(0, lightOnDownloads)
+        compose.onNodeWithText("Tiếp tục với nhận diện vật thể").performScrollTo().performClick()
+        assertEquals(1, continues)
     }
 
 }

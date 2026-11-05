@@ -146,7 +146,7 @@ fun VietAssistScreen() {
     var showDeviceSetup by rememberSaveable {
         mutableStateOf(!onboardingPrefs.getBoolean("device_setup_v1_seen", false))
     }
-    var deviceRequirements by remember { mutableStateOf(VinternRequirements.read(context)) }
+    var deviceRequirements by remember { mutableStateOf(LightOnRequirements.read(context)) }
     var onboardingAlreadyCompleted by remember {
         mutableStateOf(onboardingPrefs.getBoolean("onboarding_v2_completed", false))
     }
@@ -170,40 +170,33 @@ fun VietAssistScreen() {
     var onboardingSpeaking by remember { mutableStateOf(false) }
     var onboardingDone by remember { mutableStateOf(onboardingAlreadyCompleted) }
     var micPermissionRequestPending by remember { mutableStateOf(false) }
-    // Vintern (AI đọc ảnh chạy trên máy): chụp một khung hình rồi mô tả hoặc đọc chi tiết.
+    // LightOn (AI đọc ảnh chạy trên máy): chụp một khung hình rồi mô tả hoặc đọc chi tiết.
     val coroutineScope = rememberCoroutineScope()
-    var vinternCaptureRequest by remember { mutableIntStateOf(0) }
-    val vinternRun = remember { AtomicLong(0) }
-    val vinternCancellation = remember { AtomicLong(0) }
+    var lightonCaptureRequest by remember { mutableIntStateOf(0) }
+    val lightonRun = remember { AtomicLong(0) }
+    val lightonCancellation = remember { AtomicLong(0) }
     var hasCapturedResult by remember { mutableStateOf(false) }
     DisposableEffect(Unit) {
         onDispose {
-            vinternRun.incrementAndGet()
-            VinternEngine.cancel(vinternCancellation)
+            lightonRun.incrementAndGet()
+            LightOnEngine.cancel(lightonCancellation)
         }
     }
-    var vinternMode by remember { mutableStateOf(VinternEngine.Mode.DESCRIBE) }
-    var vinternBusy by remember { mutableStateOf(false) }
-    var vinternAwaitingFrame by remember { mutableStateOf(false) }
-    var vinternCancelled by remember { mutableStateOf(false) }
-    var vinternStatus by remember { mutableStateOf("") }
-    var modelReady by remember { mutableStateOf(VinternModelManager.isReady(context)) }
-    val preparationState by VinternEngine.preparationState.collectAsState()
+    var lightonMode by remember { mutableStateOf(LightOnEngine.Mode.DESCRIBE) }
+    var lightonBusy by remember { mutableStateOf(false) }
+    var lightonAwaitingFrame by remember { mutableStateOf(false) }
+    var lightonCancelled by remember { mutableStateOf(false) }
+    var lightonStatus by remember { mutableStateOf("") }
     var lightOnReady by remember { mutableStateOf(LightOnModelManager.isReady(context)) }
     val lightOnDownload by LightOnModelManager.downloadState.collectAsState()
-    val lightOnPreparation by VinternEngine.preparationFor(VisionModel.LIGHTON).collectAsState()
-    LaunchedEffect(lightOnDownload) { if (!lightOnDownload.downloading) lightOnReady = LightOnModelManager.isReady(context) }
-    LaunchedEffect(modelReady, lightOnReady, ocrBackend) {
-        val model = if (ocrBackend == OcrBackend.LIGHTON) VisionModel.LIGHTON else VisionModel.VINTERN
-        if (model.files.isReady(context)) VinternEngine.prepare(context, model = model)
+    val lightOnPreparation by LightOnEngine.preparationState.collectAsState()
+    LaunchedEffect(lightOnDownload) {
+        if (!lightOnDownload.downloading) lightOnReady = LightOnModelManager.isReady(context)
     }
-    val downloadState by VinternModelManager.downloadState.collectAsState()
-    val modelDownloading = downloadState.downloading
-    val modelDownloadPercent = downloadState.percent
+    LaunchedEffect(lightOnReady, ocrBackend) {
+        if (ocrBackend == OcrBackend.LIGHTON && lightOnReady) LightOnEngine.prepare(context)
+    }
     var modelDownloadJob by remember { mutableStateOf<Job?>(null) }
-    LaunchedEffect(downloadState) {
-        if (!downloadState.downloading) modelReady = VinternModelManager.isReady(context)
-    }
     val downloadGeneration = remember { AtomicLong(0) }
     DisposableEffect(Unit) {
         onDispose { downloadGeneration.incrementAndGet() }
@@ -592,8 +585,7 @@ fun VietAssistScreen() {
     DisposableEffect(setupLifecycleOwner) {
         val observer = LifecycleEventObserver { _, event ->
             if (event == Lifecycle.Event.ON_RESUME) {
-                deviceRequirements = VinternRequirements.read(context)
-                modelReady = VinternModelManager.isReady(context)
+                deviceRequirements = LightOnRequirements.read(context)
                 lightOnReady = LightOnModelManager.isReady(context)
                 hasPermission = ContextCompat.checkSelfPermission(context, Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED
                 micPermissionGranted = ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED
@@ -604,24 +596,23 @@ fun VietAssistScreen() {
     }
     LaunchedEffect(showDeviceSetup) {
         while (showDeviceSetup) {
-            deviceRequirements = VinternRequirements.read(context)
-            modelReady = VinternModelManager.isReady(context)
+            deviceRequirements = LightOnRequirements.read(context)
             lightOnReady = LightOnModelManager.isReady(context)
             kotlinx.coroutines.delay(2000)
         }
     }
 
-    val modelSizeText = "khoảng ${VinternModelManager.totalBytes / (1024 * 1024)} megabyte"
+    val modelSizeText = "khoảng ${LightOnModelManager.totalBytes / (1024 * 1024)} megabyte"
 
-    fun startModelDownload(model: VisionModel = localModelFor(VinternEngine.Mode.READ, ocrSettings.backend.value) ?: VisionModel.VINTERN) {
+    fun startModelDownload(model: VisionModel = localModelFor(LightOnEngine.Mode.READ, ocrSettings.backend.value) ?: VisionModel.LIGHTON) {
         val store = model.files
         val ready = store.isReady(context)
-        val state = VinternEngine.preparationFor(model).value
+        val state = LightOnEngine.preparationFor(model).value
         val download = store.downloadState.value
-        deviceRequirements = VinternRequirements.read(context, store)
+        deviceRequirements = LightOnRequirements.read(context, store)
         val blocked = deviceRequirements.downloadBlocker
         if (blocked != null) {
-            vinternStatus = blocked
+            lightonStatus = blocked
             showDeviceSetup = true
             speakMessage(blocked, TextToSpeech.QUEUE_FLUSH, null, "lumora_requirements")
             return
@@ -629,8 +620,8 @@ fun VietAssistScreen() {
         if (ready) {
             speakMessage(
                 when (state) {
-                    VinternEngine.PreparationState.Ready -> "AI đã sẵn sàng. Bạn có thể nói mô tả xung quanh hoặc đọc chi tiết."
-                    is VinternEngine.PreparationState.Failed -> state.message
+                    LightOnEngine.PreparationState.Ready -> "AI đã sẵn sàng. Bạn có thể nói mô tả xung quanh hoặc đọc chi tiết."
+                    is LightOnEngine.PreparationState.Failed -> state.message
                     else -> "Mô hình đã tải xong. AI đang chuẩn bị; bạn vẫn có thể dùng OCR ML Kit trong Thiết lập."
                 },
                 TextToSpeech.QUEUE_FLUSH,
@@ -648,7 +639,7 @@ fun VietAssistScreen() {
             )
             return
         }
-        vinternStatus = ""
+        lightonStatus = ""
         speakMessage(
             "Bắt đầu tải ${model.label}, ${store.totalBytes / 1048576} megabyte. Nên dùng Wi-Fi. Tôi sẽ báo khi tải xong.",
             TextToSpeech.QUEUE_FLUSH,
@@ -662,16 +653,15 @@ fun VietAssistScreen() {
                     store.download(context) { }
                     true
                 } catch (error: Exception) {
-                    Log.e("LUMORA_VINTERN", "Tải mô hình thất bại", error)
+                    Log.e("LUMORA_LIGHTON", "Tải mô hình thất bại", error)
                     false
                 }
             }
             if (downloadGeneration.get() != generation) return@launch
-            modelReady = VinternModelManager.isReady(context)
             lightOnReady = LightOnModelManager.isReady(context)
             if (succeeded && store.isReady(context)) {
-                vinternStatus = "Đã tải xong. Đang chuẩn bị AI…"
-                VinternEngine.prepare(context, retry = true, model = model)
+                lightonStatus = "Đã tải xong. Đang chuẩn bị AI…"
+                LightOnEngine.prepare(context, retry = true, model = model)
                 speakMessage(
                     "Đã tải xong mô hình. Tôi đang chuẩn bị AI; OCR bằng ML Kit vẫn dùng được.",
                     TextToSpeech.QUEUE_FLUSH,
@@ -679,7 +669,7 @@ fun VietAssistScreen() {
                     "lumora_model_downloaded"
                 )
             } else {
-                vinternStatus = "Tải mô hình AI chưa thành công"
+                lightonStatus = "Tải mô hình AI chưa thành công"
                 speakMessage(
                     "Tải mô hình AI chưa thành công. Hãy kiểm tra mạng rồi nói tải mô hình để tải tiếp.",
                     TextToSpeech.QUEUE_FLUSH,
@@ -690,25 +680,30 @@ fun VietAssistScreen() {
         }
     }
 
-    fun stopVintern() {
-        vinternCancelled = true
+    fun stopLightOn() {
+        lightonCancelled = true
         hasCapturedResult = false
-        VinternEngine.cancel(vinternCancellation)
+        LightOnEngine.cancel(lightonCancellation)
         // Invalidate every phase, including an inference already running on the worker.
-        vinternRun.incrementAndGet()
-        vinternAwaitingFrame = false
-        vinternCaptureRequest = 0
-        vinternBusy = false
-        vinternStatus = ""
+        lightonRun.incrementAndGet()
+        lightonAwaitingFrame = false
+        lightonCaptureRequest = 0
+        lightonBusy = false
+        lightonStatus = ""
     }
 
-    fun requestCapture(mode: VinternEngine.Mode) {
+    fun requestCapture(mode: LightOnEngine.Mode) {
+        if (mode == LightOnEngine.Mode.DESCRIBE) {
+            speakMessage(speechText ?: "Chưa nhận diện được vật thể. Hãy hướng camera ra xung quanh.",
+                TextToSpeech.QUEUE_FLUSH, null, "lumora_describe_objects")
+            return
+        }
         val model = localModelFor(mode, ocrSettings.backend.value)
         if (model != null) {
-            deviceRequirements = VinternRequirements.read(context, model.files)
+            deviceRequirements = LightOnRequirements.read(context, model.files)
             val blocked = deviceRequirements.inferenceBlocker
             if (blocked != null) {
-                vinternStatus = blocked
+                lightonStatus = blocked
                 showDeviceSetup = true
                 speakMessage(blocked, TextToSpeech.QUEUE_FLUSH, null, "lumora_requirements")
                 return
@@ -726,15 +721,15 @@ fun VietAssistScreen() {
             // Analyze prepares the requested model on the shared executor.
             // Switching OCR/description must not be blocked by the other model's state.
         }
-        if (vinternBusy && mode == VinternEngine.Mode.READ && vinternMode == VinternEngine.Mode.DESCRIBE) {
-            stopVintern()
+        if (lightonBusy && mode == LightOnEngine.Mode.READ && lightonMode == LightOnEngine.Mode.DESCRIBE) {
+            stopLightOn()
         }
-        if (vinternBusy) {
+        if (lightonBusy) {
             speakMessage(
                 "Tôi vẫn đang phân tích, vui lòng chờ.",
                 TextToSpeech.QUEUE_FLUSH,
                 null,
-                "lumora_vintern_busy"
+                "lumora_lighton_busy"
             )
             return
         }
@@ -745,92 +740,91 @@ fun VietAssistScreen() {
 
         capturedOcrBackend = ocrSettings.backend.value
         detectionEnabled = true
-        vinternMode = mode
-        vinternBusy = true
-        vinternCancelled = false
-        vinternAwaitingFrame = true
-        val request = vinternRun.incrementAndGet()
+        lightonMode = mode
+        lightonBusy = true
+        lightonCancelled = false
+        lightonAwaitingFrame = true
+        val request = lightonRun.incrementAndGet()
         hasCapturedResult = false
-        vinternStatus = if (mode == VinternEngine.Mode.DESCRIBE) {
+        lightonStatus = if (mode == LightOnEngine.Mode.DESCRIBE) {
             "Đang chụp ảnh để mô tả chi tiết..."
         } else {
             "Đang chụp để đọc chữ bằng ${capturedOcrBackend.label}..."
         }
         speakMessage(
-            if (mode == VinternEngine.Mode.DESCRIBE) {
+            if (mode == LightOnEngine.Mode.DESCRIBE) {
                 "Giữ điện thoại yên, tôi đang chụp và mô tả."
             } else {
                 "Giữ điện thoại yên trên tài liệu, tôi đang chụp để đọc chữ bằng ${capturedOcrBackend.label}."
             },
             TextToSpeech.QUEUE_FLUSH,
             null,
-            "lumora_vintern_start"
+            "lumora_lighton_start"
         )
         coroutineScope.launch {
             // Chờ người dùng giữ máy ổn định và camera kịp lấy nét rồi mới chụp.
             kotlinx.coroutines.delay(1500)
-            if (vinternRun.get() != request || !vinternAwaitingFrame) return@launch
-            vinternCaptureRequest = request.toInt()
+            if (lightonRun.get() != request || !lightonAwaitingFrame) return@launch
+            lightonCaptureRequest = request.toInt()
             kotlinx.coroutines.delay(8000)
-            if (vinternRun.get() == request && vinternAwaitingFrame && vinternCaptureRequest == request.toInt()) {
-                vinternAwaitingFrame = false
-                vinternBusy = false
-                vinternStatus = ""
+            if (lightonRun.get() == request && lightonAwaitingFrame && lightonCaptureRequest == request.toInt()) {
+                lightonAwaitingFrame = false
+                lightonBusy = false
+                lightonStatus = ""
                 speakMessage(
                     "Tôi chưa chụp được hình ảnh. Hãy thử lại.",
                     TextToSpeech.QUEUE_FLUSH,
                     null,
-                    "lumora_vintern_no_frame"
+                    "lumora_lighton_no_frame"
                 )
             }
         }
     }
 
     fun handleCapturedFrame(request: Long, frame: Bitmap) {
-        if (vinternRun.get() != request || !vinternAwaitingFrame) {
+        if (lightonRun.get() != request || !lightonAwaitingFrame) {
             frame.recycle()
             return
         }
-        vinternAwaitingFrame = false
-        vinternCaptureRequest = 0
-        // Bản sao chỉ dành cho UI; bitmap gốc được VinternEngine sở hữu và giải phóng.
+        lightonAwaitingFrame = false
+        lightonCaptureRequest = 0
+        // Bản sao chỉ dành cho UI; bitmap gốc được LightOnEngine sở hữu và giải phóng.
         hasCapturedResult = true
-        vinternStatus = "Đang phân tích ảnh đã chụp..."
+        lightonStatus = "Đang phân tích ảnh đã chụp..."
         speakMessage("Đã chụp ảnh. Tôi đang phân tích.", TextToSpeech.QUEUE_FLUSH, null, "lumora_frame_captured")
-        val mode = vinternMode
+        val mode = lightonMode
         val backend = capturedOcrBackend
         coroutineScope.launch {
             val model = localModelFor(mode, backend)
             val result = if (model == null) MlKitOcr.read(frame)
-            else VinternEngine.analyze(context, frame, mode, vinternCancellation, model)
-            if (vinternRun.get() != request) return@launch
-            vinternBusy = false
-            if (vinternCancelled) {
+            else LightOnEngine.analyze(context, frame, mode, lightonCancellation, model)
+            if (lightonRun.get() != request) return@launch
+            lightonBusy = false
+            if (lightonCancelled) {
                 hasCapturedResult = false
-                vinternStatus = "Đã dừng phân tích ảnh."
+                lightonStatus = "Đã dừng phân tích ảnh."
                 return@launch
             }
-            vinternStatus = ""
+            lightonStatus = ""
             when (result) {
-                is VinternEngine.Result.Success -> {
-                    val message = if (mode == VinternEngine.Mode.DESCRIBE) {
+                is LightOnEngine.Result.Success -> {
+                    val message = if (mode == LightOnEngine.Mode.DESCRIBE) {
                         "AI mô tả: ${result.text}"
                     } else {
                         // Cho phép lệnh "đọc lại" đọc lại kết quả này.
                         lastReadText = result.text
                         "${backend.label} đọc được: ${result.text}"
                     }
-                    vinternStatus = message
+                    lightonStatus = message
                     speakMessage(
                         message,
                         TextToSpeech.QUEUE_FLUSH,
                         null,
-                        "lumora_vintern_result"
+                        "lumora_lighton_result"
                     )
                 }
-                VinternEngine.Result.ModelMissing -> {
-                    vinternStatus = "Chưa có mô hình AI. Hãy mở thiết lập để tải."
-                    modelReady = VinternModelManager.isReady(context)
+                LightOnEngine.Result.ModelMissing -> {
+                    lightonStatus = "Chưa có mô hình AI. Hãy mở thiết lập để tải."
                     lightOnReady = LightOnModelManager.isReady(context)
                     speakMessage(
                         "Không tìm thấy mô hình AI. Hãy nói tải mô hình.",
@@ -839,19 +833,19 @@ fun VietAssistScreen() {
                         "lumora_model_missing"
                     )
                 }
-                VinternEngine.Result.Failed -> {
-                    vinternStatus = if (localModelFor(mode, backend) != null) "AI chưa phân tích được ảnh. Hãy thử lại hoặc kiểm tra Thiết lập."
+                LightOnEngine.Result.Failed -> {
+                    lightonStatus = if (localModelFor(mode, backend) != null) "AI chưa phân tích được ảnh. Hãy thử lại hoặc kiểm tra Thiết lập."
                         else "OCR ML Kit chưa đọc được ảnh. Hãy giữ máy yên, đủ sáng rồi nói chụp lại."
                     speakMessage(
-                        vinternStatus,
+                        lightonStatus,
                         TextToSpeech.QUEUE_FLUSH,
                         null,
-                        "lumora_vintern_failed"
+                        "lumora_lighton_failed"
                     )
                 }
-                VinternEngine.Result.Cancelled -> {
+                LightOnEngine.Result.Cancelled -> {
                     hasCapturedResult = false
-                    vinternStatus = "Đã dừng phân tích ảnh."
+                    lightonStatus = "Đã dừng phân tích ảnh."
                 }
             }
         }
@@ -905,13 +899,13 @@ fun VietAssistScreen() {
                 VoiceCommand.DOWNLOAD -> startModelDownload()
 
                 VoiceCommand.DESCRIBE -> {
-                    requestCapture(VinternEngine.Mode.DESCRIBE)
+                    requestCapture(LightOnEngine.Mode.DESCRIBE)
                 }
 
-                VoiceCommand.READ -> { requestCapture(VinternEngine.Mode.READ) }
+                VoiceCommand.READ -> { requestCapture(LightOnEngine.Mode.READ) }
 
                 VoiceCommand.STOP_READING -> {
-                    stopVintern()
+                    stopLightOn()
                     ttsEngine?.stop()
                     activeUtteranceId = null
                     ttsSpeaking = false
@@ -928,7 +922,7 @@ fun VietAssistScreen() {
                 }
 
                 VoiceCommand.PAUSE -> {
-                    stopVintern()
+                    stopLightOn()
                     detectionEnabled = false
                     detectedText = "Đã tạm dừng quan sát"
                     speakMessage(
@@ -942,7 +936,7 @@ fun VietAssistScreen() {
                 VoiceCommand.RESUME -> {
                     if (hasPermission) {
                         hasCapturedResult = false
-                        vinternStatus = ""
+                        lightonStatus = ""
                         detectionEnabled = true
                         detectedText = "Đã quay lại chế độ quan sát"
                         speakMessage(
@@ -957,7 +951,7 @@ fun VietAssistScreen() {
                 }
                 VoiceCommand.RECAPTURE -> {
 
-                    requestCapture(vinternMode)
+                    requestCapture(lightonMode)
                 }
                 VoiceCommand.REPEAT -> {
                     val textToRepeat = lastReadText
@@ -1012,8 +1006,6 @@ fun VietAssistScreen() {
         DeviceSetupScreen(
             requirements = deviceRequirements,
             cameraGranted = hasPermission, micGranted = micPermissionGranted,
-            modelReady = modelReady, downloading = modelDownloading,
-            preparationState = preparationState,
             ttsStatus = ttsStatus,
             ttsReady = ttsReady,
             onTestVoice = { speakMessage("Xin chào. Tôi đang đọc tiếng Việt. Bạn có thể nói đọc văn bản để đọc chữ trước mặt.", TextToSpeech.QUEUE_FLUSH, null, "lumora_voice_test") },
@@ -1026,7 +1018,7 @@ fun VietAssistScreen() {
             lightOnProgress = lightOnDownload.percent,
             lightOnPreparation = lightOnPreparation,
             onDownloadLightOn = { startModelDownload(VisionModel.LIGHTON) },
-            onPrepareLightOn = { VinternEngine.prepare(context, retry = true, model = VisionModel.LIGHTON) },
+            onPrepareLightOn = { LightOnEngine.prepare(context, retry = true, model = VisionModel.LIGHTON) },
             ocrBackend = ocrBackend,
             onOcrBackendChange = ocrSettings::select,
             alwaysListening = alwaysListening,
@@ -1036,24 +1028,23 @@ fun VietAssistScreen() {
                 hostActivity?.syncVoiceService()
                 if (enabled && !micPermissionGranted) micPermissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
             },
-            progress = modelDownloadPercent, status = vinternStatus,
+            status = lightonStatus,
             onCamera = { permissionLauncher.launch(Manifest.permission.CAMERA) },
             onMicrophone = { micPermissionLauncher.launch(Manifest.permission.RECORD_AUDIO) },
             onSettings = {
                 context.startActivity(Intent(android.provider.Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
                     android.net.Uri.parse("package:${context.packageName}")))
             },
-            onDownload = { startModelDownload(VisionModel.VINTERN) },
             onRefresh = {
-                deviceRequirements = VinternRequirements.read(context)
-                modelReady = VinternModelManager.isReady(context)
-                if (modelReady) VinternEngine.prepare(context, retry = true)
+                deviceRequirements = LightOnRequirements.read(context)
+                lightOnReady = LightOnModelManager.isReady(context)
+                if (lightOnReady && ocrBackend == OcrBackend.LIGHTON) LightOnEngine.prepare(context, retry = true)
             },
             onReadStatus = {
                 val message = deviceRequirements.hardwareBlocker ?: deviceRequirements.inferenceBlocker
-                    ?: if (modelReady) when (val state = preparationState) {
-                        VinternEngine.PreparationState.Ready -> "AI đã sẵn sàng. Bạn có thể mô tả ảnh hoặc đọc chi tiết."
-                        is VinternEngine.PreparationState.Failed -> state.message
+                    ?: if (lightOnReady) when (val state = lightOnPreparation) {
+                        LightOnEngine.PreparationState.Ready -> "AI đã sẵn sàng. Bạn có thể mô tả ảnh hoặc đọc chi tiết."
+                        is LightOnEngine.PreparationState.Failed -> state.message
                         else -> "Đã tải mô hình. AI đang chuẩn bị; camera và OCR ML Kit vẫn dùng được."
                     }
                     else deviceRequirements.downloadBlocker ?: "Máy có thể tải mô hình AI, $modelSizeText."
@@ -1114,7 +1105,7 @@ fun VietAssistScreen() {
                     shape = RoundedCornerShape(50)
                 ) {
                     Text(
-                        text = if (vinternBusy) "ĐANG XỬ LÝ ẢNH"
+                        text = if (lightonBusy) "ĐANG XỬ LÝ ẢNH"
                             else if (hasPermission) "CAMERA TRỰC TIẾP" else "CHƯA CẤP CAMERA",
                         color = accentGreen,
                         fontSize = 11.sp,
@@ -1130,7 +1121,7 @@ fun VietAssistScreen() {
                 verticalAlignment = Alignment.CenterVertically) {
             TextButton(
                 onClick = { manualVoicePending = false; showDeviceSetup = true },
-                enabled = !vinternBusy,
+                enabled = !lightonBusy,
                 modifier = Modifier.heightIn(min = 48.dp)
             ) { Text("THIẾT LẬP", color = accentGreen) }
 
@@ -1176,9 +1167,9 @@ fun VietAssistScreen() {
                             onDetection = { result ->
                                 detectedText = result
                             },
-                            analysisPaused = vinternBusy || !detectionEnabled,
-                            vinternCaptureRequest = vinternCaptureRequest,
-                            onVinternFrame = { request, frame -> handleCapturedFrame(request, frame) }
+                            analysisPaused = lightonBusy || !detectionEnabled,
+                            lightonCaptureRequest = lightonCaptureRequest,
+                            onLightOnFrame = { request, frame -> handleCapturedFrame(request, frame) }
                         )
                     } else {
                         Column(
@@ -1233,14 +1224,14 @@ fun VietAssistScreen() {
                     )
 
                     Text(
-                        text = if (hasCapturedResult) vinternStatus else (speechText ?: detectedText),
+                        text = if (hasCapturedResult) lightonStatus else (speechText ?: detectedText),
                         color = white,
                         fontSize = 16.sp
                     )
 
-                    if (vinternStatus.isNotBlank() && !hasCapturedResult) {
+                    if (lightonStatus.isNotBlank() && !hasCapturedResult) {
                         Text(
-                            text = vinternStatus,
+                            text = lightonStatus,
                             color = accentGreen,
                             fontSize = 15.sp
                         )
@@ -1296,9 +1287,7 @@ fun VietAssistScreen() {
                 }
             }
 
-            if (modelReady && !vinternBusy && preparationState == VinternEngine.PreparationState.Preparing)
-                VinternPreparationStatus(preparationState)
-            if (ocrBackend == OcrBackend.LIGHTON && lightOnReady && !vinternBusy && lightOnPreparation == VinternEngine.PreparationState.Preparing) {
+            if (ocrBackend == OcrBackend.LIGHTON && lightOnReady && !lightonBusy && lightOnPreparation == LightOnEngine.PreparationState.Preparing) {
                 Text("Đang chuẩn bị LightOnOCR…", color = accentGreen)
             }
 
@@ -1308,14 +1297,9 @@ fun VietAssistScreen() {
             )
             Button(
                 onClick = {
-                    when {
-                        !modelReady -> { showDeviceSetup = true }
-                        preparationState is VinternEngine.PreparationState.Failed ->
-                            VinternEngine.prepare(context, retry = true)
-                        else -> requestCapture(VinternEngine.Mode.DESCRIBE)
-                    }
+                    requestCapture(LightOnEngine.Mode.READ)
                 },
-                enabled = !vinternBusy && !modelDownloading,
+                enabled = !lightonBusy,
                 modifier = Modifier
                     .fillMaxWidth()
                     .heightIn(min = 58.dp),
@@ -1326,20 +1310,13 @@ fun VietAssistScreen() {
                 )
             ) {
                 Text(
-                    text = when {
-                        modelDownloading -> "ĐANG TẢI MÔ HÌNH AI $modelDownloadPercent%"
-                        !modelReady -> "BẬT MÔ TẢ CHI TIẾT"
-                        vinternBusy -> "AI ĐANG PHÂN TÍCH..."
-                        preparationState is VinternEngine.PreparationState.Failed -> "THỬ CHUẨN BỊ AI LẠI"
-                        preparationState == VinternEngine.PreparationState.Preparing -> "ĐANG CHUẨN BỊ AI…"
-                        else -> "CHỤP · MÔ TẢ XUNG QUANH"
-                    },
+                    text = if (lightonBusy) "ĐANG ĐỌC ẢNH…" else "CHỤP · ĐỌC VĂN BẢN",
                     fontSize = 16.sp
                 )
             }
 
-            if (vinternBusy) {
-                OutlinedButton(onClick = { stopVintern() }, modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)) {
+            if (lightonBusy) {
+                OutlinedButton(onClick = { stopLightOn() }, modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)) {
                     Text("Dừng phân tích")
                 }
             }

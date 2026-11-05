@@ -36,11 +36,7 @@ class VoiceCommandFeedbackTest {
             activity = ActivityScenario.launch(MainActivity::class.java)
             if (sceneFirst) {
                 compose.waitUntil(15000) {
-                    compose.onAllNodes(hasText("CHỤP · MÔ TẢ XUNG QUANH")).fetchSemanticsNodes().isNotEmpty()
-                }
-                compose.onNodeWithText("CHỤP · MÔ TẢ XUNG QUANH").performClick()
-                compose.waitUntil(10000) {
-                    compose.onAllNodes(hasText("Đang phân tích ảnh đã chụp...", substring = true)).fetchSemanticsNodes().isNotEmpty()
+                    compose.onAllNodes(hasText("CHỤP · ĐỌC VĂN BẢN")).fetchSemanticsNodes().isNotEmpty()
                 }
                 shell("settings --user 0 put secure voice_recognition_service com.vietassist.app/com.vietassist.app.TestCommandRecognitionService")
                 compose.onNodeWithText("Nhấn để nói").performClick()

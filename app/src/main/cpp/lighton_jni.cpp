@@ -1,5 +1,5 @@
-// Shared JNI owner for Vintern scene description and LightOnOCR transcription.
-// GPU OpenCL mã hóa ảnh; trên Adreno 735, CPU sinh văn bản nhanh hơn GPU.
+// JNI owner for GPU-only LightOnOCR transcription.
+// LightOnOCR uses OpenCL for vision and all language-model layers.
 // Kotlin bảo đảm chỉ một luồng gọi vào đây.
 
 #include <jni.h>
@@ -19,20 +19,14 @@
 #include "mtmd.h"
 #include "mtmd-helper.h"
 
-#define TAG "LUMORA_VINTERN"
+#define TAG "LUMORA_LIGHTON"
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO, TAG, __VA_ARGS__)
 #define LOGW(...) __android_log_print(ANDROID_LOG_WARN, TAG, __VA_ARGS__)
 #define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, TAG, __VA_ARGS__)
 
 namespace {
 
-// Lời hệ thống gốc của Vintern (mẫu hội thoại Hermes-2 trong repo 5CD-AI).
-constexpr const char * SYSTEM_PROMPT =
-        "Bạn là một mô hình trí tuệ nhân tạo đa phương thức Tiếng Việt có tên gọi là Vintern, "
-        "được phát triển bởi người Việt. Bạn là một trợ lý trí tuệ nhân tạo hữu ích và không gây hại.";
-
-constexpr int N_CTX   = 4096;
-constexpr int N_BATCH = 512;
+constexpr int N_BATCH = 128;
 
 std::mutex g_mutex;
 std::atomic<bool> g_cancel{false};
@@ -40,29 +34,19 @@ llama_model   * g_model = nullptr;
 llama_context * g_lctx  = nullptr;
 mtmd_context  * g_mctx  = nullptr;
 std::string g_backend_name;
-bool g_lighton = false;
-int g_context_size = N_CTX;
+int g_context_size = 8192;
 
-// Các file GGUF Vintern hiện có không khai báo tokenizer.ggml.eos_token_id, nên
-// llama.cpp lấy mặc định id 11 (dấu phẩy trong từ vựng Qwen) làm token kết thúc
-// và câu trả lời bị cắt ở dấu phẩy đầu tiên. Vì vậy tự tìm token kết thúc của
-// mẫu hội thoại ChatML thay vì dùng llama_vocab_is_eog().
-llama_token g_im_end     = LLAMA_TOKEN_NULL;
-llama_token g_endoftext  = LLAMA_TOKEN_NULL;
-
-llama_token single_special_token(const llama_vocab * vocab, const char * text) {
-    llama_token tokens[4];
-    const int32_t n = llama_tokenize(vocab, text, static_cast<int32_t>(strlen(text)),
-                                     tokens, 4, false, true);
-    return n == 1 ? tokens[0] : LLAMA_TOKEN_NULL;
+constexpr bool is_gpu_type(enum ggml_backend_dev_type type) {
+    return type == GGML_BACKEND_DEVICE_TYPE_GPU || type == GGML_BACKEND_DEVICE_TYPE_IGPU;
 }
+static_assert(is_gpu_type(GGML_BACKEND_DEVICE_TYPE_GPU));
+static_assert(is_gpu_type(GGML_BACKEND_DEVICE_TYPE_IGPU));
+static_assert(!is_gpu_type(GGML_BACKEND_DEVICE_TYPE_CPU));
+static_assert(!is_gpu_type(GGML_BACKEND_DEVICE_TYPE_ACCEL));
+static_assert(!is_gpu_type(GGML_BACKEND_DEVICE_TYPE_META));
 
 bool is_stop_token(const llama_vocab * vocab, llama_token token) {
-    if (g_lighton) return llama_vocab_is_eog(vocab, token);
-    if (g_im_end == LLAMA_TOKEN_NULL && g_endoftext == LLAMA_TOKEN_NULL) {
-        return llama_vocab_is_eog(vocab, token);
-    }
-    return token == g_im_end || token == g_endoftext;
+    return llama_vocab_is_eog(vocab, token);
 }
 
 void log_callback(ggml_log_level level, const char * text, void * /*user_data*/) {
@@ -96,8 +80,26 @@ jbyteArray to_byte_array(JNIEnv * env, const std::string & value) {
 
 }  // namespace
 
+// Runtime device enumeration, without loading a model or allocating its weights.
+extern "C" JNIEXPORT jboolean JNICALL
+Java_com_vietassist_app_LightOnNative_nativeGpuAvailable(JNIEnv * env, jobject, jstring native_lib_dir) {
+    std::lock_guard<std::mutex> lock(g_mutex);
+    try {
+        const std::string dir = to_std_string(env, native_lib_dir);
+        ggml_backend_load_all_from_path(dir.c_str());
+        for (size_t i = 0; i < ggml_backend_dev_count(); ++i) {
+            auto device = ggml_backend_dev_get(i);
+            if (is_gpu_type(ggml_backend_dev_type(device)) &&
+                std::strcmp(ggml_backend_reg_name(ggml_backend_dev_backend_reg(device)), "OpenCL") == 0) {
+                return JNI_TRUE;
+            }
+        }
+    } catch (const std::exception &) { }
+    return JNI_FALSE;
+}
+
 extern "C" JNIEXPORT void JNICALL
-Java_com_vietassist_app_VinternNative_nativeInit(JNIEnv * env, jobject, jstring native_lib_dir, jstring cache_dir) {
+Java_com_vietassist_app_LightOnNative_nativeInit(JNIEnv * env, jobject, jstring native_lib_dir, jstring cache_dir) {
     try {
         const std::string cache = to_std_string(env, cache_dir) + "/opencl";
         setenv("GGML_OPENCL_KERNEL_CACHE_DIR", cache.c_str(), 1);
@@ -115,12 +117,10 @@ Java_com_vietassist_app_VinternNative_nativeInit(JNIEnv * env, jobject, jstring 
 }
 
 extern "C" JNIEXPORT jboolean JNICALL
-Java_com_vietassist_app_VinternNative_nativeLoad(
-        JNIEnv * env, jobject, jstring model_path, jstring mmproj_path, jint n_threads, jboolean light_on) {
+Java_com_vietassist_app_LightOnNative_nativeLoad(
+        JNIEnv * env, jobject, jstring model_path, jstring mmproj_path, jint n_threads) {
     std::lock_guard<std::mutex> lock(g_mutex);
     free_all();
-    g_lighton = light_on == JNI_TRUE;
-    g_context_size = g_lighton ? 8192 : N_CTX;
     try {
 
         const std::string model_file  = to_std_string(env, model_path);
@@ -129,34 +129,26 @@ Java_com_vietassist_app_VinternNative_nativeLoad(
         ggml_backend_dev_t gpu = nullptr;
         for (size_t i = 0; i < ggml_backend_dev_count(); ++i) {
             auto device = ggml_backend_dev_get(i);
-            if (std::strcmp(ggml_backend_reg_name(ggml_backend_dev_backend_reg(device)), "OpenCL") == 0) {
+            if (is_gpu_type(ggml_backend_dev_type(device)) &&
+                std::strcmp(ggml_backend_reg_name(ggml_backend_dev_backend_reg(device)), "OpenCL") == 0) {
                 gpu = device;
                 break;
             }
         }
-        if (!gpu) {
-            LOGE("Không có GPU OpenCL phù hợp để chạy Vintern");
+        if (!gpu || !llama_supports_gpu_offload()) {
+            LOGE("Không có GPU OpenCL phù hợp để chạy AI");
             return JNI_FALSE;
         }
-        // Đã đo trên Adreno 735: GPU nhanh ở phần ảnh, CPU nhanh ở phần từng token.
-        // Đây là cấu hình theo thiết bị, không tự chuyển backend khi lỗi.
-        const bool cpu_language = std::strcmp(
-                ggml_backend_dev_description(gpu), "QUALCOMM Adreno(TM) 735") == 0;
-        ggml_backend_dev_t devices[] = { cpu_language ? nullptr : gpu, nullptr };
+        ggml_backend_dev_t devices[] = { gpu, nullptr };
 
         llama_model_params model_params = llama_model_default_params();
         model_params.devices = devices;
-        model_params.n_gpu_layers = cpu_language ? 0 : -1;
+        model_params.n_gpu_layers = -1;
         g_model = llama_model_load_from_file(model_file.c_str(), model_params);
         if (!g_model) {
             LOGE("Không tải được mô hình ngôn ngữ: %s", model_file.c_str());
             return JNI_FALSE;
         }
-
-        const llama_vocab * vocab = llama_model_get_vocab(g_model);
-        g_im_end    = single_special_token(vocab, "<|im_end|>");
-        g_endoftext = single_special_token(vocab, "<|endoftext|>");
-        LOGI("Token kết thúc: <|im_end|>=%d, <|endoftext|>=%d", g_im_end, g_endoftext);
 
         llama_context_params ctx_params = llama_context_default_params();
         ctx_params.n_ctx           = g_context_size;
@@ -164,8 +156,10 @@ Java_com_vietassist_app_VinternNative_nativeLoad(
         ctx_params.n_threads       = n_threads;
         ctx_params.n_threads_batch = n_threads;
         ctx_params.no_perf         = false;
-        ctx_params.op_offload      = !cpu_language;
-        ctx_params.offload_kqv     = !cpu_language;
+        // GPU attention without Flash Attention; no CPU language execution path.
+        ctx_params.flash_attn_type = LLAMA_FLASH_ATTN_TYPE_DISABLED;
+        ctx_params.op_offload      = true;
+        ctx_params.offload_kqv     = true;
         g_lctx = llama_init_from_model(g_model, ctx_params);
         if (!g_lctx) {
             LOGE("Không tạo được llama_context");
@@ -179,7 +173,8 @@ Java_com_vietassist_app_VinternNative_nativeLoad(
         mtmd_params.n_threads     = n_threads;
         mtmd_params.print_timings = true;
         mtmd_params.warmup        = false;
-        if (g_lighton) mtmd_params.image_max_tokens = 4096;
+        mtmd_params.flash_attn_type = LLAMA_FLASH_ATTN_TYPE_DISABLED;
+        mtmd_params.image_max_tokens = 4096;
         g_mctx = mtmd_init_from_file(mmproj_file.c_str(), g_model, mtmd_params);
         if (!g_mctx || !mtmd_support_vision(g_mctx)) {
             LOGE("Không tải được bộ mã hóa ảnh: %s", mmproj_file.c_str());
@@ -187,26 +182,25 @@ Java_com_vietassist_app_VinternNative_nativeLoad(
             return JNI_FALSE;
         }
 
-        LOGI("Đã tải Vintern: ảnh GPU %s, ngôn ngữ %s, %d luồng CPU",
-             ggml_backend_dev_description(gpu), cpu_language ? "CPU" : "GPU OpenCL", n_threads);
-        g_backend_name = cpu_language ? "OpenCL+CPU" : "OpenCL";
+        LOGI("Đã tải LightOnOCR: ảnh và ngôn ngữ GPU OpenCL %s", ggml_backend_dev_description(gpu));
+        g_backend_name = "OpenCL";
         return JNI_TRUE;
     } catch (const std::exception &) {
-        LOGE("Không khởi tạo được mô hình Vintern");
+        LOGE("Không khởi tạo được mô hình LightOn");
         free_all();
         return JNI_FALSE;
     }
 }
 
 extern "C" JNIEXPORT jstring JNICALL
-Java_com_vietassist_app_VinternNative_nativeBackendName(JNIEnv * env, jobject) {
+Java_com_vietassist_app_LightOnNative_nativeBackendName(JNIEnv * env, jobject) {
     std::lock_guard<std::mutex> lock(g_mutex);
     return env->NewStringUTF(g_backend_name.c_str());
 }
 
-// Làm nóng từng backend mà không đưa 256 token ảnh và câu hỏi giả qua LLM.
+// Validate vision and the actual OCR prefill batch on GPU before publishing readiness.
 extern "C" JNIEXPORT jboolean JNICALL
-Java_com_vietassist_app_VinternNative_nativeWarmup(JNIEnv *, jobject) {
+Java_com_vietassist_app_LightOnNative_nativeWarmup(JNIEnv *, jobject) {
     std::lock_guard<std::mutex> lock(g_mutex);
     if (!g_model || !g_lctx || !g_mctx) return JNI_FALSE;
     const auto started = std::chrono::steady_clock::now();
@@ -219,6 +213,7 @@ Java_com_vietassist_app_VinternNative_nativeWarmup(JNIEnv *, jobject) {
         auto chunks = std::unique_ptr<mtmd_input_chunks, decltype(&mtmd_input_chunks_free)>(
                 mtmd_input_chunks_init(), mtmd_input_chunks_free);
         const mtmd_bitmap * bitmaps[] = { bitmap.get() };
+        LOGI("GPU warmup: vision start");
         if (mtmd_tokenize(g_mctx, chunks.get(), &text, bitmaps, 1) != 0) return JNI_FALSE;
         bool encoded = false;
         for (size_t i = 0; i < mtmd_input_chunks_size(chunks.get()); ++i) {
@@ -227,11 +222,16 @@ Java_com_vietassist_app_VinternNative_nativeWarmup(JNIEnv *, jobject) {
             if (mtmd_encode_chunk(g_mctx, chunk) != 0) return JNI_FALSE;
             encoded = true;
         }
-        if (!encoded || g_im_end == LLAMA_TOKEN_NULL) return JNI_FALSE;
+        LOGI("GPU warmup: vision complete");
+        if (!encoded) return JNI_FALSE;
         llama_memory_clear(llama_get_memory(g_lctx), true);
-        llama_token token = g_im_end;
-        auto batch = llama_batch_get_one(&token, 1);
+        llama_token token = llama_vocab_eos(llama_model_get_vocab(g_model));
+        if (token == LLAMA_TOKEN_NULL) return JNI_FALSE;
+        std::vector<llama_token> warmup_tokens(N_BATCH, token);
+        auto batch = llama_batch_get_one(warmup_tokens.data(), N_BATCH);
+        LOGI("GPU warmup: language start");
         const int result = llama_decode(g_lctx, batch);
+        LOGI("GPU warmup: language complete, status=%d", result);
         llama_memory_clear(llama_get_memory(g_lctx), true);
         LOGI("Làm nóng encoder và LLM: %lld ms", static_cast<long long>(
                 std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -245,7 +245,7 @@ Java_com_vietassist_app_VinternNative_nativeWarmup(JNIEnv *, jobject) {
 // Trả về văn bản UTF-8 dạng byte[] (Kotlin tự giải mã) để không lỗi khi
 // câu trả lời bị cắt giữa một ký tự nhiều byte. Trả về null nếu lỗi hoặc bị hủy.
 extern "C" JNIEXPORT jbyteArray JNICALL
-Java_com_vietassist_app_VinternNative_nativeGenerate(
+Java_com_vietassist_app_LightOnNative_nativeGenerate(
         JNIEnv * env, jobject, jbyteArray rgb, jint width, jint height,
         jstring question, jint max_tokens) {
     std::lock_guard<std::mutex> lock(g_mutex);
@@ -272,18 +272,9 @@ Java_com_vietassist_app_VinternNative_nativeGenerate(
         // Mỗi câu hỏi là một lượt độc lập; không giữ lịch sử hội thoại.
         llama_memory_clear(llama_get_memory(g_lctx), true);
 
-        const std::string vintern_prompt =
-                std::string("<|im_start|>system\n") + SYSTEM_PROMPT + "<|im_end|>\n" +
-                "<|im_start|>user\n" + mtmd_default_marker() + "\n" +
-                to_std_string(env, question) + "<|im_end|>\n" +
-                "<|im_start|>assistant\n";
-
-        // Official LightOnOCR-3 transcription: image-only user turn, no system prompt,
-        // Qwen3.5 thinking disabled. Vision boundary tokens come from libmtmd.
-        const std::string prompt = g_lighton
-            ? std::string("<|im_start|>user\n") + mtmd_default_marker() +
-              "<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n"
-            : vintern_prompt;
+        // Official image-only transcription, thinking disabled.
+        const std::string prompt = std::string("<|im_start|>user\n") + mtmd_default_marker() +
+            "<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n";
 
         mtmd_input_text text;
         text.text          = prompt.c_str();
@@ -315,10 +306,6 @@ Java_com_vietassist_app_VinternNative_nativeGenerate(
         const llama_vocab * vocab = llama_model_get_vocab(g_model);
         auto sampler = std::unique_ptr<llama_sampler, decltype(&llama_sampler_free)>(
                 llama_sampler_chain_init(llama_sampler_chain_default_params()), llama_sampler_free);
-        // Giải mã tham lam (giống do_sample=False của model card) kèm phạt lặp nhẹ,
-        // vì mô hình nhỏ dễ lặp lại một cụm từ khi đọc văn bản dài.
-        if (!g_lighton) llama_sampler_chain_add(sampler.get(), llama_sampler_init_penalties(
-                llama_vocab_n_tokens(vocab), 64, 1.15f, 0.0f, 0.0f));
         llama_sampler_chain_add(sampler.get(), llama_sampler_init_greedy());
 
         std::string output;
@@ -345,7 +332,7 @@ Java_com_vietassist_app_VinternNative_nativeGenerate(
         }
 
         if (!ok) return nullptr;
-        LOGI("Vintern trả lời %zu byte", output.size());
+        LOGI("LightOn trả lời %zu byte", output.size());
         return to_byte_array(env, output);
     } catch (const std::exception &) {
         env->ThrowNew(env->FindClass("java/lang/IllegalStateException"), "AI chưa xử lý được ảnh");
@@ -354,12 +341,12 @@ Java_com_vietassist_app_VinternNative_nativeGenerate(
 }
 
 extern "C" JNIEXPORT void JNICALL
-Java_com_vietassist_app_VinternNative_nativeCancel(JNIEnv *, jobject) {
+Java_com_vietassist_app_LightOnNative_nativeCancel(JNIEnv *, jobject) {
     g_cancel.store(true);
 }
 
 extern "C" JNIEXPORT void JNICALL
-Java_com_vietassist_app_VinternNative_nativeUnload(JNIEnv *, jobject) {
+Java_com_vietassist_app_LightOnNative_nativeUnload(JNIEnv *, jobject) {
     std::lock_guard<std::mutex> lock(g_mutex);
     free_all();
 }

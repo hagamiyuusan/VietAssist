@@ -13,7 +13,7 @@ android {
         applicationId = "com.vietassist.app"
         minSdk = 26
         targetSdk = 37
-        versionCode = 4
+        versionCode = 6
         versionName = "1.0"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
@@ -25,7 +25,7 @@ android {
             }
         }
 
-        // llama.cpp cho Vintern chỉ được build cho các ABI này.
+        // llama.cpp cho LightOnOCR chỉ được build cho các ABI này.
         ndk {
             abiFilters += listOf("arm64-v8a", "x86_64")
         }

@@ -51,8 +51,8 @@ class OcrSettingsTest {
             color = Color.BLACK; textSize = 180f; typeface = Typeface.MONOSPACE
         })
         val result = MlKitOcr.read(image)
-        assertTrue(result is VinternEngine.Result.Success)
-        assertEquals("12345", (result as VinternEngine.Result.Success).text.filter(Char::isDigit))
+        assertTrue(result is LightOnEngine.Result.Success)
+        assertEquals("12345", (result as LightOnEngine.Result.Success).text.filter(Char::isDigit))
         assertTrue(image.isRecycled)
     }
     @Test fun cancelledOcrCannotPublishAndEventuallyReleasesItsOwnImage() = runBlocking {

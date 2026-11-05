@@ -37,8 +37,8 @@ fun CameraPreview(
     modifier: Modifier = Modifier,
     onDetection: (String) -> Unit,
     analysisPaused: Boolean = false,
-    vinternCaptureRequest: Int = 0,
-    onVinternFrame: (Long, Bitmap) -> Unit = { _, frame -> frame.recycle() }
+    lightonCaptureRequest: Int = 0,
+    onLightOnFrame: (Long, Bitmap) -> Unit = { _, frame -> frame.recycle() }
 ) {
     val context = LocalContext.current
     val lifecycle = LocalLifecycleOwner.current
@@ -50,7 +50,7 @@ fun CameraPreview(
     val handled = remember { AtomicLong(0) }
     val paused by rememberUpdatedState(analysisPaused)
     val publish by rememberUpdatedState(onDetection)
-    val capture by rememberUpdatedState(onVinternFrame)
+    val capture by rememberUpdatedState(onLightOnFrame)
     val overlay = remember { arrayOfNulls<DetectionOverlay>(1) }
     val previewRef = remember { arrayOfNulls<PreviewView>(1) }
     val streamObserver = remember { arrayOfNulls<Observer<PreviewView.StreamState>>(1) }
@@ -61,7 +61,7 @@ fun CameraPreview(
         try { ObjectDetector.createFromFile(context, "efficientdet-lite0.tflite") }
         catch (_: Exception) { null }
     }
-    LaunchedEffect(vinternCaptureRequest) { requested.set(vinternCaptureRequest.toLong()) }
+    LaunchedEffect(lightonCaptureRequest) { requested.set(lightonCaptureRequest.toLong()) }
     LaunchedEffect(analysisPaused) {
         epoch.incrementAndGet()
         if (analysisPaused) overlay[0]?.update(emptyList())

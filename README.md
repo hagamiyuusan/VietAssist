@@ -1,73 +1,42 @@
 # LUMORA / VietAssist
 
-Ứng dụng Android hỗ trợ quan sát và đọc nội dung bằng tiếng Việt.
+Ứng dụng Android hỗ trợ nhận diện vật thể và đọc văn bản bằng tiếng Việt.
 
-## Các luồng xử lý
+## Sử dụng
 
-- **Camera trực tiếp:** luôn hiện sau khi cấp quyền camera. Camera không tự phát giọng đọc; chỉ đọc khi có yêu cầu. EfficientDet vẽ khung, nhãn và độ tin cậy của vật thể; tọa độ được chuyển sang preview qua cùng CameraX viewport, có xử lý xoay và crop.
-- **Chụp · mô tả xung quanh:** chụp một ảnh gửi Vintern. Camera tiếp tục phát; EfficientDet tạm dừng trong lúc xử lý để hạn chế tranh tài nguyên. Kết quả dưới camera thuộc ảnh vừa chụp; không thay preview bằng ảnh tĩnh.
-- **Đọc chữ:** ra lệnh “đọc văn bản”, “đọc tài liệu” hoặc “hãy đọc”. Luồng chụp dùng **OCR mặc định** trong Thiết lập: **ML Kit** (mặc định, không cần Vintern) hoặc **LightOnOCR 0.8B** (cần model riêng). Không tự đổi backend khi lỗi. “Đọc kỹ/đọc chi tiết” cũng dùng cùng lựa chọn OCR; không có hai nút đọc riêng trên màn hình chính.
+- Camera luôn hiển thị sau khi cấp quyền, cùng bounding box nhận diện vật thể. Không tự phát giọng đọc cảnh.
+- Nút **Chụp · Đọc văn bản** hoặc lệnh **đọc văn bản** chụp ảnh và dùng bộ OCR trong Settings.
+- **ML Kit là mặc định**, không cần tải model hoặc GPU OpenCL. Lựa chọn LightOnOCR đã lưu được giữ khi nâng cấp; lựa chọn Vintern cũ chuyển một lần về ML Kit.
+- **LightOnOCR-3-0.8B** là lựa chọn OCR nâng cao duy nhất. Chỉ cho tải, chuẩn bị và chạy khi kiểm tra GPU OpenCL đạt; không chuyển sang CPU nếu lỗi.
+- Lệnh **mô tả xung quanh** đọc các vật thể đang nhận diện trên camera, không gọi VLM. Vintern đã được gỡ khỏi model, bộ tải, JNI và giao diện.
+- Nhấn để nói hoặc bật Luôn nghe trong Settings. Nhận dạng giọng nói do dịch vụ Android đảm nhiệm. Kiểm thử bằng dịch vụ giả lập không chứng minh nhận dạng giọng nói thực tế.
 
-`OcrSettings` là nguồn duy nhất cho lựa chọn OCR. Mỗi lượt đọc giữ lựa chọn tại thời điểm bắt đầu; thay đổi Settings không làm đổi backend của lượt đang xử lý. “Đọc lại” đọc kết quả chữ đã lưu; “chụp lại/nhận diện lại” dùng lựa chọn hiện tại để lấy ảnh mới. Các lệnh tạm dừng quan sát chỉ dừng nhận diện vật thể, camera vẫn hiển thị.
+## LightOnOCR và kiểm tra GPU
 
-## LightOnOCR cho đọc văn bản
+`LightOnRequirements` là nguồn kiểm tra chung của Settings, bộ tải và engine: Android 9+, tiến trình 64 bit, thư viện native, GPU OpenCL được runtime tìm thấy, dung lượng và tình trạng RAM. Chỉ có file thư viện OpenCL chưa được coi là có GPU phù hợp. Chuẩn bị model còn phải nạp thành công và làm nóng trên GPU trước khi báo sẵn sàng.
 
-Trong **Thiết lập → OCR mặc định**, chọn **LightOnOCR 0.8B**, sau đó **Tải LightOnOCR**. Đây là LightOnOCR-3-0.8B với model ngôn ngữ Q4_K_M và bộ mã hóa ảnh F16, tổng 734.284.576 byte (khoảng 700 MiB), tách biệt khỏi file Vintern. Lựa chọn OCR vẫn có mặc định ML Kit; app không tự đổi backend nếu thiếu model hoặc suy luận lỗi.
+`LightOnEngine` sở hữu một executor và runtime native. Encoder ảnh cùng toàn bộ layer ngôn ngữ được offload lên OpenCL, gồm KV cache và các phép toán offload được runtime hỗ trợ. CPU vẫn điều phối, xử lý ảnh đầu vào và tokenizer; không có chế độ chạy model ngôn ngữ bằng CPU. Không tự đổi OCR khi thiếu model, lỗi GPU hoặc suy luận thất bại.
 
-Nguồn gốc: [LightOn chính thức](https://huggingface.co/lightonai/LightOnOCR-3-0.8B); [GGUF dùng trong app](https://huggingface.co/richardyoung/LightOnOCR-3-0.8B-GGUF/tree/5901dcc106d24a337ec0762a072cd58b2c330fa6). Mỗi file được ghim revision, kích thước và SHA-256 trong `VinternModelManager.kt`; các model dùng chung bộ tải có tiếp tục tải và trạng thái riêng.
+LightOnOCR dùng prompt rỗng, chỉ gửi ảnh, theo [chế độ transcription chính thức](https://huggingface.co/lightonai/LightOnOCR-3-0.8B#prompt-modes). Mẫu hội thoại Qwen3.5 tắt thinking nằm ở `app/src/main/cpp/lighton_jni.cpp`. Native runtime: llama.cpp b11645; OpenCL Headers/loader v2026.05.29 được ghim SHA-256 trong CMake.
 
-Runtime llama.cpp b11645 dùng chung một executor và chỉ giữ một model trong RAM. Đọc văn bản bằng LightOnOCR dùng ảnh và mẫu hội thoại Qwen3.5 tắt thinking, không chèn lời hệ thống Vintern hay phạt lặp làm đổi chữ. Mô tả cảnh luôn dùng Vintern; chuyển tác vụ có thể phải nạp model còn lại. Trạng thái chuẩn bị của mỗi model được giữ riêng và thu hồi khi model bị giải phóng. Hủy lượt đọc không cho phép kết quả cũ xuất hiện.
+Model ngôn ngữ Q8_0 và encoder ảnh F16 có tổng 1.016.830.752 byte, nằm trong thư mục ứng dụng `files/lighton`. [Nguồn GGUF](https://huggingface.co/richardyoung/LightOnOCR-3-0.8B-GGUF/tree/5901dcc106d24a337ec0762a072cd58b2c330fa6) được ghim revision, kích thước, SHA-256 trong `LightOnModelManager.kt`. Bộ tải hỗ trợ tiếp tục file dở, chặn người ghi song song và xác minh hash trước khi công bố hoàn tất.
 
-LightOnOCR nhận tối đa cạnh dài 2048 px và sinh tối đa 2048 token trong cấu hình hiện tại. Luồng camera hiện vẫn lấy ảnh phân tích có độ phân giải mục tiêu 1280×720, nên cấu hình này chưa thay thế bước chụp tài liệu độ phân giải cao. Trên iQOO Z9 Turbo / Adreno 735, một lượt ảnh tiếng Việt tổng hợp 1000×600 (bốn dòng) đã đọc đúng các cụm dấu và số kiểm tra: suy luận khoảng 8,4 giây, tổng lượt đầu khoảng 11,8 giây gồm nạp và làm nóng. Đây là một phép thử chức năng, chưa phải benchmark chất lượng tài liệu chụp thực tế hoặc thời gian trung vị; trang dài có thể chậm hơn.
+## Giới hạn đã biết
 
-`LightOnDeviceTest` kiểm tra ảnh tiếng Việt tổng hợp, chữ số, thiếu model, khóa thiết bị không phù hợp và chuyển Vintern ↔ LightOn mà không chia sẻ sai trạng thái sẵn sàng. Hai kiểm thử LightOn và bảy kiểm thử Settings/OCR đã qua trên thiết bị. Chỉ chạy kiểm thử suy luận khi đã có file model trên thiết bị; không ghi ảnh hoặc văn bản người dùng vào log.
+Trước khi chuyển toàn bộ layer ngôn ngữ sang GPU, ảnh mẫu tiếng Việt 1000×600 đọc đúng các cụm kiểm tra trong khoảng 8–10 giây; một ảnh camera 1920×856 mất khoảng 42 giây rồi trả rỗng. Các số này thuộc cấu hình cũ, không chứng minh tốc độ hoặc chất lượng bản GPU hiện tại. Chưa coi đọc tài liệu camera thực tế là đạt. Camera vẫn dùng ảnh ImageAnalysis, chưa có luồng chụp tài liệu độ phân giải cao.
 
-## Điều khiển bằng giọng nói
-
-Trong **Thiết lập → Điều khiển bằng giọng nói**, chọn:
-
-- **Nhấn để nói** (mặc định): nhấn nút trên màn hình chính để mở một phiên nhận lệnh tiếng Việt ngay trong app bằng `SpeechRecognizer` của Android. Nhận kết quả hoặc hủy thì phiên kết thúc, không tự nghe lại và không chạy service nghe nền. Nút đổi thành “Đang nghe… Nhấn để dừng” trong phiên; có thể bấm để hủy. Nếu máy thiếu dịch vụ nhận giọng nói, app báo rõ và các nút chức năng vẫn dùng được.
-- **Luôn nghe**: nghe lệnh tự động khi app ở phía trước và nghe câu gọi khi chạy nền. Cần quyền micro; có thể tốn pin hơn. Khi đổi về Nhấn để nói, app dừng service nghe nền và bỏ callback của phiên nghe cũ.
-
-Khi nhận lệnh hợp lệ, màn hình hiện “Đã nhận lệnh” và tác vụ tương ứng; lệnh đọc hiển thị cả bộ OCR đang chọn. Trạng thái đang nghe và lỗi nhận dạng hiển thị ở cả hai chế độ. Lệnh ngắn đầy đủ có thể được nhận ngay từ kết quả tạm thời, không phải chờ dịch vụ chốt cả câu. Mỗi phiên nghe có danh tính riêng; kết thúc phiên sẽ giải phóng recognizer và bỏ callback đến muộn, kể cả khi dịch vụ bị ngắt kết nối. Camera không tự đọc vật thể. App vẫn cho phép lệnh ngắn ngắt lời phản hồi, đồng thời chặn nhận lại chính câu hướng dẫn đang phát.
-
-Trong Thiết lập có trạng thái giọng Việt, nút nghe thử và mở cài đặt giọng đọc hệ thống. Activity và service dùng chung chính sách kiểm tra giọng `vi` đã cài; app không tự dùng giọng ngôn ngữ khác.
-
-`VoiceSettings` lưu và cung cấp cùng một lựa chọn cho màn hình, Activity và service. Các lệnh nhận được ở cả hai chế độ đều đi qua cùng hàm xử lý lệnh. Việc nhận dạng giọng nói do dịch vụ Android cung cấp, không phải Vintern; khả năng hoạt động khi không có mạng phụ thuộc dịch vụ trên máy.
-
-## Tải model và chuẩn bị AI
-
-Tải đủ file chỉ có nghĩa là model đã nằm trên bộ nhớ lưu trữ. Khi mở ứng dụng, engine nạp model vào RAM và chạy một ảnh đen tổng hợp để chuẩn bị các kernel trước khi công bố **AI đã sẵn sàng**. Giao diện hiển thị trạng thái chuẩn bị; OCR vẫn sử dụng được trong lúc chờ nếu chọn ML Kit.
-
-Engine thuộc tiến trình ứng dụng, được dùng lại khi đổi hoặc mở lại Activity. Đóng màn hình không chủ động giải phóng model. Nếu Android kết thúc tiến trình, lần mở tiếp theo cần chuẩn bị lại. Đây là đánh đổi RAM để giảm thời gian chờ khi sử dụng AI.
-
-Lỗi chuẩn bị được hiển thị và có thao tác thử lại; không tự đổi sang model khác hay chặn chức năng OCR cơ bản.
+Mỗi lượt chụp có mã riêng; lượt cũ và callback nhận giọng nói đến muộn không được ghi đè kết quả mới. Bitmap do engine sở hữu được giải phóng cả khi hủy.
 
 ## Build và kiểm thử
 
-Cấu hình Android SDK qua `local.properties` hoặc `ANDROID_HOME`, và JDK tương thích với Gradle wrapper. Cho máy ARM64:
-
 ```sh
-bash ./gradlew :app:assembleDebug :app:assembleDebugAndroidTest \
-  :app:testDebugUnitTest :app:lintDebug -Pandroid.injected.build.abi=arm64-v8a
+ANDROID_HOME=/home/huy/Android/Sdk JAVA_HOME=/home/huy/.gradle/jdks/eclipse_adoptium-25-amd64-linux.2 bash ./gradlew :app:assembleDebug :app:assembleDebugAndroidTest :app:testDebugUnitTest :app:lintDebug -Pandroid.injected.build.abi=arm64-v8a
 ```
 
-APK debug hiện được tạo tại `app/build/intermediates/apk/debug/app-debug.apk`. Kiểm thử suy luận cần điện thoại có driver OpenCL và hai file Vintern đã tải. `VinternDeviceTest` kiểm tra chuẩn bị/làm nóng, hủy yêu cầu đang xếp hàng, tái sử dụng model và đọc ảnh tổng hợp. Các kiểm thử Compose kiểm tra trạng thái chuẩn bị, lựa chọn OCR và lưu cài đặt. Kiểm thử ảnh tổng hợp kiểm tra đọc ML Kit và phép ánh xạ khung vào preview.
+APK debug: `app/build/intermediates/apk/debug/app-debug.apk`. `LightOnDeviceTest` kiểm tra đọc ảnh tiếng Việt tổng hợp trên backend OpenCL. Các kiểm thử Settings kiểm tra ML Kit mặc định, lựa chọn OCR, chặn tải khi thiếu GPU, và tiếp tục dùng chức năng cơ bản. Không ghi ảnh hoặc nội dung OCR của người dùng vào log.
 
-## Lịch sử Git
+Backend cuối dùng OpenCL và model Q8_0. Bản Q4_K_M không chạy được token ngôn ngữ GPU trên thiết bị Adreno 735 đã thử. Probe OpenCL + Q8_0 đã đọc đúng mẫu chữ số công khai “12345” ở ảnh 480×160, khoảng 1,57 giây. Đây là phép thử chức năng, chưa phải benchmark chất lượng OCR ảnh camera. Không có cấu hình chuyển model về CPU.
 
-Git được khởi tạo ngày 2026-11-04. Commit `ac10e34` là ảnh chụp code đang có trước sửa đổi khởi động/UI lần này; không phải lịch sử nguyên thủy trước toàn bộ quá trình phát triển. Model tải về, APK, cache build và cấu hình máy cá nhân được loại khỏi Git.
+Bản OpenCL + Q8_0 đã qua kiểm thử ảnh tiếng Việt bốn dòng 1000×600 trên Adreno 735: các cụm có dấu và chữ số đúng, suy luận khoảng 15,6 giây trong một lượt. Không coi đây là benchmark tốc độ trung vị; chưa chứng minh chất lượng tài liệu camera thực tế. Toàn bộ 25/25 layer ngôn ngữ được offload lên GPU, encoder ảnh cũng dùng OpenCL. Kernel được cache trong thư mục cache riêng của app.
 
-### Prompt mặc định
-
-Vintern dùng chỉ dẫn mô tả cố định trong `VinternEngine.Mode`: tối đa ba câu, nêu vật thể và vị trí, không đoán chi tiết không rõ. `VinternEngine.defaultPrompt` là nguồn chọn chỉ dẫn cho mỗi lượt gọi native. LightOnOCR dùng prompt rỗng, chỉ gửi ảnh, đúng chế độ transcription chính thức; không ghép câu lệnh giọng nói, lịch sử hay chỉ dẫn mô tả của Vintern vào OCR. Mẫu hội thoại theo từng model được đóng gói trong JNI.
-
-Lệnh “đọc văn bản” được ưu tiên khi đang mô tả cảnh: lượt mô tả bị hủy và mã lượt cũ bị vô hiệu trước khi chụp cho OCR đã chọn. Lệnh trùng khi đang đọc vẫn báo bận. Phiên nhấn để nói kết thúc ngay sau khi nhận lệnh, trả lại nút micro.
-
-Giới hạn đã quan sát: một lượt ảnh camera 1920×856 dùng LightOnOCR mất khoảng 42,4 giây rồi trả văn bản rỗng; kiểm thử đầu-cuối yêu cầu có nội dung đã thất bại. Kết quả ảnh tổng hợp ở trên không chứng minh chất lượng ảnh camera hoặc tốc độ sử dụng thực tế.
-
-Bản sửa prompt/ưu tiên lệnh đã qua build, lint, 17 unit test và 10 Android test trên bản cài hiện tại (9 kiểm thử LightOn/Settings/OCR cùng 1 kiểm thử điều phối lệnh với ML Kit). Kiểm thử giọng nói dùng recognition service giả lập; không chứng minh nhận dạng tiếng nói thực tế. Kiểm thử camera LightOn yêu cầu văn bản vẫn thất bại như giới hạn nêu trên.
-
-Vintern đã được bỏ khỏi lựa chọn OCR; chỉ còn dùng cho mô tả cảnh theo yêu cầu. Cài đặt OCR Vintern cũ được chuyển một lần về ML Kit. Camera trực tiếp chỉ cập nhật hình/khung vật thể, không tự đọc kết quả nhận diện để tránh tiếng loa lấn lệnh giọng nói.
-
-Bản bỏ Vintern OCR/tự đọc camera đã qua build, lint, 17 unit test và 8 Android test trên APK cài thực tế: chỉ còn hai lựa chọn OCR, chuyển cài đặt Vintern cũ, từ chối giá trị không hợp lệ, và điều phối lệnh đọc bằng dịch vụ nhận giọng nói giả lập. Chưa xác nhận nhận dạng giọng nói của người dùng ngoài đời trên bản này.
+Xác minh bản cài cuối trên iQOO Z9 Turbo / Adreno 735: build và lint qua, 16 unit test, 2 kiểm thử LightOn GPU và 9 kiểm thử Settings/OCR/lệnh qua. Lượt chuẩn bị sau khi giữ cache khoảng 4,6 giây; lượt ảnh tiếng Việt lặp lại khoảng 15,6 giây. Kiểm thử lệnh dùng recognition service giả lập, chưa xác nhận nhận giọng người dùng thực tế. Camera trực tiếp đã được kiểm tra đang phát, OCR trên điện thoại là ML Kit và bộ nghe thật đã khôi phục.

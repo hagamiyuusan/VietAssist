@@ -11,7 +11,7 @@
 #   public *;
 #}
 
-# Hàm JNI của Vintern (app/src/main/cpp/vintern_jni.cpp) được tìm theo tên.
--keepclasseswithmembernames class com.vietassist.app.VinternNative {
+# Hàm JNI của LightOn (app/src/main/cpp/lighton_jni.cpp) được tìm theo tên.
+-keepclasseswithmembernames class com.vietassist.app.LightOnNative {
     native <methods>;
 }

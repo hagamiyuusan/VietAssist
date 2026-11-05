@@ -9,19 +9,19 @@ import kotlin.coroutines.resume
 
 /** Sở hữu ảnh đến khi ML Kit hoàn tất, kể cả khi màn hình đã hủy lượt đọc. */
 internal object MlKitOcr {
-    suspend fun read(bitmap: Bitmap): VinternEngine.Result = suspendCancellableCoroutine { continuation ->
+    suspend fun read(bitmap: Bitmap): LightOnEngine.Result = suspendCancellableCoroutine { continuation ->
         val recognizer = try { TextRecognition.getClient(TextRecognizerOptions.DEFAULT_OPTIONS) }
         catch (_: Exception) {
             bitmap.recycle()
-            if (continuation.isActive) continuation.resume(VinternEngine.Result.Failed)
+            if (continuation.isActive) continuation.resume(LightOnEngine.Result.Failed)
             return@suspendCancellableCoroutine
         }
         try {
             recognizer.process(InputImage.fromBitmap(bitmap, 0)).addOnCompleteListener { task ->
                 val result = try {
                     if (task.isSuccessful) {
-                        VinternEngine.Result.Success(task.result.text.trim().ifBlank { "Không thấy chữ." })
-                    } else VinternEngine.Result.Failed
+                        LightOnEngine.Result.Success(task.result.text.trim().ifBlank { "Không thấy chữ." })
+                    } else LightOnEngine.Result.Failed
                 } finally {
                     bitmap.recycle()
                     recognizer.close()
@@ -31,7 +31,7 @@ internal object MlKitOcr {
         } catch (_: Exception) {
             bitmap.recycle()
             recognizer.close()
-            if (continuation.isActive) continuation.resume(VinternEngine.Result.Failed)
+            if (continuation.isActive) continuation.resume(LightOnEngine.Result.Failed)
         }
     }
 }

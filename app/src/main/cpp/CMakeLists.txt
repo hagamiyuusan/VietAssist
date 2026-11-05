@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.22.1)
 
-project("vintern" C CXX)
+project("lighton" C CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -61,9 +61,9 @@ FetchContent_Declare(
 )
 FetchContent_MakeAvailable(llama_cpp)
 
-add_library(vintern SHARED vintern_jni.cpp)
+add_library(lighton SHARED lighton_jni.cpp)
 
-target_link_libraries(vintern
+target_link_libraries(lighton
         mtmd
         llama
         ggml

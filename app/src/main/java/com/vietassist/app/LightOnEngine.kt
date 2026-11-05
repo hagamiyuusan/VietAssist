@@ -13,21 +13,21 @@ import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicLong
 
 enum class VisionModel(val label: String) {
-    VINTERN("Vintern"), LIGHTON("LightOnOCR 0.8B");
+    LIGHTON("LightOnOCR 0.8B");
     val files: VisionModelStore get() = when (this) {
-        VINTERN -> VinternModelManager
         LIGHTON -> LightOnModelManager
     }
 }
 
-/** Hàm native trong libvintern.so (app/src/main/cpp/vintern_jni.cpp). */
-internal object VinternNative {
+/** Hàm native trong liblighton.so (app/src/main/cpp/lighton_jni.cpp). */
+internal object LightOnNative {
     init {
-        System.loadLibrary("vintern")
+        System.loadLibrary("lighton")
     }
 
+    external fun nativeGpuAvailable(nativeLibDir: String): Boolean
     external fun nativeInit(nativeLibDir: String, cacheDir: String)
-    external fun nativeLoad(modelPath: String, mmprojPath: String, nThreads: Int, lightOn: Boolean): Boolean
+    external fun nativeLoad(modelPath: String, mmprojPath: String, nThreads: Int): Boolean
     external fun nativeBackendName(): String
     external fun nativeWarmup(): Boolean
     external fun nativeGenerate(
@@ -43,33 +43,12 @@ internal object VinternNative {
 
 /**
  * Một executor sở hữu runtime và một model tại một thời điểm.
- * Vintern mô tả cảnh; lượt OCR giữ model đã chọn khi chụp.
+ * LightOnOCR chỉ chép chữ; ML Kit là OCR mặc định.
  */
-object VinternEngine {
-    private const val TAG = "LUMORA_VINTERN"
+object LightOnEngine {
+    private const val TAG = "LUMORA_LIGHTON"
 
-    // Ảnh không quá 448 px chỉ tạo 1 ô (256 token ảnh); không quá 896 px tạo tối đa
-    // 2x2 ô và một ảnh tổng quan, đúng giới hạn max_dynamic_patch = 4 của Vintern.
-    enum class Mode(val maxSide: Int, val maxTokens: Int, val question: String) {
-        DESCRIBE(
-            maxSide = 448,
-            maxTokens = 160,
-            question = "Hãy mô tả ngắn gọn cảnh trong ảnh cho người khiếm thị, tối đa ba câu. " +
-                    "Nêu các vật thể chính và vị trí của chúng như bên trái, bên phải, phía trước. " +
-                    "Nếu có chữ to dễ đọc thì đọc ra. Không đoán những gì không nhìn rõ."
-        ),
-        READ(
-            maxSide = 896,
-            maxTokens = 512,
-            question = "Hãy đọc chính xác toàn bộ chữ trong ảnh theo thứ tự từ trên xuống dưới. " +
-                    "Chỉ ghi lại chữ có trong ảnh, không giải thích và không thêm nội dung. " +
-                    "Nếu không có chữ, trả lời: Không thấy chữ."
-        )
-    }
-
-    // Fixed task instructions. LightOn transcription is image-only, as trained upstream.
-    internal fun defaultPrompt(model: VisionModel, mode: Mode): String =
-        if (model == VisionModel.LIGHTON) "" else mode.question
+    enum class Mode { DESCRIBE, READ }
 
     sealed class Result {
         data class Success(val text: String) : Result()
@@ -79,7 +58,7 @@ object VinternEngine {
     }
 
     private val executor = Executors.newSingleThreadExecutor { runnable ->
-        Thread(runnable, "lumora-vintern")
+        Thread(runnable, "lumora-lighton")
     }
     private val dispatcher = executor.asCoroutineDispatcher()
 
@@ -92,16 +71,14 @@ object VinternEngine {
 
     private val mutablePreparationState = MutableStateFlow<PreparationState>(PreparationState.NotLoaded)
     val preparationState = mutablePreparationState.asStateFlow()
-    private val lightOnPreparation = MutableStateFlow<PreparationState>(PreparationState.NotLoaded)
-    private val lightOnState = lightOnPreparation.asStateFlow()
-    fun preparationFor(model: VisionModel) = if (model == VisionModel.VINTERN) preparationState else lightOnState
-    private fun stateFor(model: VisionModel) = if (model == VisionModel.VINTERN) mutablePreparationState else lightOnPreparation
+    fun preparationFor(model: VisionModel) = preparationState
+    private fun stateFor(model: VisionModel) = mutablePreparationState
     private var loadedModel: VisionModel? = null
     @Volatile private var nativeReady = false
     @Volatile private var activeCancellation: AtomicLong? = null
 
     /** Tác vụ thuộc tiến trình ứng dụng, không bị hủy khi màn hình đóng/đổi cấu hình. */
-    fun prepare(context: Context, retry: Boolean = false, model: VisionModel = VisionModel.VINTERN): Deferred<Boolean> {
+    fun prepare(context: Context, retry: Boolean = false, model: VisionModel = VisionModel.LIGHTON): Deferred<Boolean> {
         val completion = CompletableDeferred<Boolean>()
         val appContext = context.applicationContext
         executor.execute {
@@ -115,18 +92,19 @@ object VinternEngine {
     }
 
     /** Sở hữu bitmap kể cả khi coroutine bị hủy trước lúc được chạy trên executor. */
-    suspend fun analyze(context: Context, bitmap: Bitmap, mode: Mode, cancellation: AtomicLong, model: VisionModel = VisionModel.VINTERN): Result {
+    suspend fun analyze(context: Context, bitmap: Bitmap, mode: Mode, cancellation: AtomicLong, model: VisionModel = VisionModel.LIGHTON): Result {
         val request = cancellation.get()
         try {
             return withContext(dispatcher) {
+                if (mode != Mode.READ) return@withContext Result.Failed
                 if (request != cancellation.get()) return@withContext Result.Cancelled
-                if (VinternRequirements.read(context, model.files).inferenceBlocker != null) return@withContext Result.Failed
+                if (LightOnRequirements.read(context, model.files).inferenceBlocker != null) return@withContext Result.Failed
                 if (!model.files.isReady(context)) return@withContext Result.ModelMissing
                 if (!prepareOnWorker(context.applicationContext, model = model)) return@withContext Result.Failed
                 if (request != cancellation.get()) return@withContext Result.Cancelled
 
                 try {
-                    val scaled = scaleToMaxSide(bitmap, if (model == VisionModel.LIGHTON) 2048 else mode.maxSide)
+                    val scaled = scaleToMaxSide(bitmap, 2048)
                     val width = scaled.width
                     val height = scaled.height
                     val rgb = try { toRgbBytes(scaled) } finally {
@@ -136,8 +114,8 @@ object VinternEngine {
                     if (request != cancellation.get()) return@withContext Result.Cancelled
                     activeCancellation = cancellation
                     val output = try {
-                        VinternNative.nativeGenerate(rgb, width, height, defaultPrompt(model, mode),
-                            if (model == VisionModel.LIGHTON) 2048 else mode.maxTokens)
+                        LightOnNative.nativeGenerate(rgb, width, height, "",
+                            2048)
                     } finally {
                         activeCancellation = null
                     }
@@ -166,29 +144,28 @@ object VinternEngine {
     /** Chỉ hủy yêu cầu phân tích; không hủy bước chuẩn bị AI dùng chung cho tiến trình. */
     fun cancel(cancellation: AtomicLong) {
         cancellation.incrementAndGet()
-        if (nativeReady && activeCancellation === cancellation) VinternNative.nativeCancel()
+        if (nativeReady && activeCancellation === cancellation) LightOnNative.nativeCancel()
     }
 
     /** Giải phóng chủ động khi cần; đóng Activity không làm mất model đã chuẩn bị. */
     fun release() {
         executor.execute {
             try {
-                if (nativeReady) VinternNative.nativeUnload()
+                if (nativeReady) LightOnNative.nativeUnload()
             } finally {
                 loadedModel = null
                 mutablePreparationState.value = PreparationState.NotLoaded
-                lightOnPreparation.value = PreparationState.NotLoaded
             }
         }
     }
 
     // Mọi đường nạp, làm nóng và giải phóng đều chạy trên cùng executor.
-    private fun prepareOnWorker(context: Context, retry: Boolean = false, model: VisionModel = VisionModel.VINTERN): Boolean {
+    private fun prepareOnWorker(context: Context, retry: Boolean = false, model: VisionModel = VisionModel.LIGHTON): Boolean {
         val state = stateFor(model)
         val store = model.files
         if (loadedModel == model && state.value == PreparationState.Ready) return true
         if (state.value is PreparationState.Failed && !retry) return false
-        val blocker = VinternRequirements.read(context, model.files).inferenceBlocker
+        val blocker = LightOnRequirements.read(context, model.files).inferenceBlocker
         if (blocker != null) return failPreparation(model, blocker)
         if (!model.files.isReady(context)) return failPreparation(model, "Chưa tải đủ mô hình AI.")
         loadedModel?.let { stateFor(it).value = PreparationState.NotLoaded }
@@ -197,19 +174,22 @@ object VinternEngine {
         val startedAt = android.os.SystemClock.elapsedRealtime()
         try {
             if (!nativeReady) {
-                VinternNative.nativeInit(context.applicationInfo.nativeLibraryDir, context.cacheDir.absolutePath)
+                LightOnNative.nativeInit(context.applicationInfo.nativeLibraryDir, context.cacheDir.absolutePath)
                 nativeReady = true
             }
             val threads = (Runtime.getRuntime().availableProcessors() / 2).coerceIn(2, 4)
-            check(VinternNative.nativeLoad(
+            check(LightOnNative.nativeLoad(
                 store.fileFor(context, store.languageModel).absolutePath,
                 store.fileFor(context, store.visionProjector).absolutePath,
-                threads, model == VisionModel.LIGHTON
+                threads
             )) { "native-load-failed" }
+            if (model == VisionModel.LIGHTON) {
+                check(LightOnNative.nativeBackendName() == "OpenCL") { "lighton-requires-gpu" }
+            }
             Log.i(TAG, "Nạp model hoàn tất trong ${android.os.SystemClock.elapsedRealtime() - startedAt} ms")
             // Chuẩn bị encoder và một bước ngôn ngữ, không chạy lại toàn bộ
             // prefill ảnh/câu hỏi của một lượt phân tích bỏ đi.
-            check(VinternNative.nativeWarmup()) { "native-warmup-failed" }
+            check(LightOnNative.nativeWarmup()) { "native-warmup-failed" }
             loadedModel = model
             state.value = PreparationState.Ready
             Log.i(TAG, "Chuẩn bị AI hoàn tất trong ${android.os.SystemClock.elapsedRealtime() - startedAt} ms")
@@ -222,7 +202,7 @@ object VinternEngine {
     private fun failPreparation(model: VisionModel, message: String, error: Throwable? = null): Boolean {
         if (error != null) Log.e(TAG, "Chuẩn bị AI thất bại: ${error.javaClass.simpleName}")
         try {
-            if (nativeReady) VinternNative.nativeUnload()
+            if (nativeReady) LightOnNative.nativeUnload()
         } finally {
             loadedModel?.let { stateFor(it).value = PreparationState.NotLoaded }
             loadedModel = null

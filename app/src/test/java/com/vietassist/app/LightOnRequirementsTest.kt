@@ -3,8 +3,8 @@ package com.vietassist.app
 import org.junit.Assert.*
 import org.junit.Test
 
-class VinternRequirementsTest {
-    private val good = VinternRequirements(
+class LightOnRequirementsTest {
+    private val good = LightOnRequirements(
         is64Bit = true, nativeLibraryPresent = true,
         totalRam = 8L * 1024 * 1024 * 1024, availableRam = 3L * 1024 * 1024 * 1024,
         lowMemory = false, freeStorage = 1024L, requiredStorage = 1024L
@@ -15,10 +15,10 @@ class VinternRequirementsTest {
         assertNull(good.inferenceBlocker)
     }
 
-    @Test fun missingOpenClBlocksVintern() {
-        assertNotNull(good.copy(openClAvailable = false).inferenceBlocker)
-        assertNotNull(good.copy(openClAvailable = false).downloadBlocker)
-        assertNull(good.copy(openClAvailable = true).inferenceBlocker)
+    @Test fun missingOpenClBlocksLightOn() {
+        assertNotNull(good.copy(gpuAvailable = false).inferenceBlocker)
+        assertNotNull(good.copy(gpuAvailable = false).downloadBlocker)
+        assertNull(good.copy(gpuAvailable = true).inferenceBlocker)
     }
 
     @Test fun nativeAndroidVersionBoundaryIs28() {

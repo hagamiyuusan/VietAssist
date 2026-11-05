@@ -11,7 +11,7 @@ class OcrSettings internal constructor(context: Context) {
     private val prefs = context.applicationContext.getSharedPreferences("lumora_ocr", Context.MODE_PRIVATE)
     private val selected = MutableStateFlow(run {
         val saved = prefs.getString("backend", OcrBackend.ML_KIT.name)!!
-        // Vintern OCR was removed. Migrate its saved selection once to the default.
+        // LightOn OCR was removed. Migrate its saved selection once to the default.
         if (saved == "VINTERN") {
             prefs.edit().putString("backend", OcrBackend.ML_KIT.name).apply()
             OcrBackend.ML_KIT
@@ -28,9 +28,9 @@ class OcrSettings internal constructor(context: Context) {
     }
 }
 
-/** Snapshot this choice at capture time; scene descriptions always belong to Vintern. */
-internal fun localModelFor(mode: VinternEngine.Mode, backend: OcrBackend): VisionModel? =
-    if (mode == VinternEngine.Mode.DESCRIBE) VisionModel.VINTERN else when (backend) {
+/** Snapshot this choice at capture time; scene descriptions always belong to LightOn. */
+internal fun localModelFor(mode: LightOnEngine.Mode, backend: OcrBackend): VisionModel? =
+    if (mode == LightOnEngine.Mode.DESCRIBE) null else when (backend) {
         OcrBackend.ML_KIT -> null
         OcrBackend.LIGHTON -> VisionModel.LIGHTON
     }
