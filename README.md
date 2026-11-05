@@ -10,6 +10,18 @@
 
 `OcrSettings` là nguồn duy nhất cho lựa chọn OCR. Mỗi lượt đọc giữ lựa chọn tại thời điểm bắt đầu; thay đổi Settings không làm đổi backend của lượt đang xử lý. “Đọc lại” đọc kết quả chữ đã lưu; “chụp lại/nhận diện lại” dùng lựa chọn hiện tại để lấy ảnh mới. Các lệnh tạm dừng quan sát chỉ dừng nhận diện vật thể, camera vẫn hiển thị.
 
+## LightOnOCR cho đọc văn bản
+
+Trong **Thiết lập → OCR mặc định**, chọn **LightOnOCR 0.8B**, sau đó **Tải LightOnOCR**. Đây là LightOnOCR-3-0.8B với model ngôn ngữ Q4_K_M và bộ mã hóa ảnh F16, tổng 734.284.576 byte (khoảng 700 MiB), tách biệt khỏi file Vintern. Lựa chọn OCR vẫn có mặc định ML Kit; app không tự đổi backend nếu thiếu model hoặc suy luận lỗi.
+
+Nguồn gốc: [LightOn chính thức](https://huggingface.co/lightonai/LightOnOCR-3-0.8B); [GGUF dùng trong app](https://huggingface.co/richardyoung/LightOnOCR-3-0.8B-GGUF/tree/5901dcc106d24a337ec0762a072cd58b2c330fa6). Mỗi file được ghim revision, kích thước và SHA-256 trong `VinternModelManager.kt`; các model dùng chung bộ tải có tiếp tục tải và trạng thái riêng.
+
+Runtime llama.cpp b11645 dùng chung một executor và chỉ giữ một model trong RAM. Đọc văn bản bằng LightOnOCR dùng ảnh và mẫu hội thoại Qwen3.5 tắt thinking, không chèn lời hệ thống Vintern hay phạt lặp làm đổi chữ. Mô tả cảnh luôn dùng Vintern; chuyển tác vụ có thể phải nạp model còn lại. Trạng thái chuẩn bị của mỗi model được giữ riêng và thu hồi khi model bị giải phóng. Hủy lượt đọc không cho phép kết quả cũ xuất hiện.
+
+LightOnOCR nhận tối đa cạnh dài 2048 px và sinh tối đa 2048 token trong cấu hình hiện tại. Luồng camera hiện vẫn lấy ảnh phân tích có độ phân giải mục tiêu 1280×720, nên cấu hình này chưa thay thế bước chụp tài liệu độ phân giải cao. Chưa có benchmark chất lượng ảnh chụp thực tế hay tốc độ LightOnOCR trên Android; kết quả ảnh tổng hợp trên máy phát triển không thay thế bằng chứng trên điện thoại.
+
+`LightOnDeviceTest` kiểm tra ảnh tiếng Việt tổng hợp, chữ số, thiếu model, khóa thiết bị không phù hợp và chuyển Vintern ↔ LightOn mà không chia sẻ sai trạng thái sẵn sàng. Chỉ chạy kiểm thử suy luận khi đã có file model trên thiết bị; không ghi ảnh hoặc văn bản người dùng vào log.
+
 ## Điều khiển bằng giọng nói
 
 Trong **Thiết lập → Điều khiển bằng giọng nói**, chọn:

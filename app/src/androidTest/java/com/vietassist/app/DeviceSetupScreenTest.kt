@@ -14,8 +14,9 @@ class DeviceSetupScreenTest {
     @get:Rule val compose = createComposeRule()
     private var downloads = 0
     private var continues = 0
+    private var lightOnDownloads = 0
 
-    private fun show(nativePresent: Boolean) {
+    private fun show(nativePresent: Boolean, backend: OcrBackend = OcrBackend.ML_KIT) {
         compose.setContent {
             DeviceSetupScreen(
                 requirements = VinternRequirements(true, nativePresent, 8L shl 30, 3L shl 30, false, 2L shl 30, 1L shl 30),
@@ -23,7 +24,8 @@ class DeviceSetupScreenTest {
                 downloading = false, progress = 0, status = "",
                 onCamera = {}, onMicrophone = {}, onSettings = {},
                 onDownload = { downloads++ }, onRefresh = {}, onReadStatus = {},
-                onContinue = { continues++ }
+                onContinue = { continues++ },
+                ocrBackend = backend, onDownloadLightOn = { lightOnDownloads++ }
             )
         }
     }
@@ -41,4 +43,17 @@ class DeviceSetupScreenTest {
         compose.onNodeWithText("Tải mô hình AI").performScrollTo().assertIsEnabled().performClick()
         assertEquals(1, downloads)
     }
+    @Test fun lightOnDownloadUsesItsOwnAction() {
+        show(nativePresent = true, backend = OcrBackend.LIGHTON)
+        compose.onNodeWithText("Tải LightOnOCR").performScrollTo().assertIsEnabled().performClick()
+        assertEquals(1, lightOnDownloads)
+        assertEquals(0, downloads)
+    }
+
+    @Test fun unsupportedDeviceAlsoBlocksLightOnDownload() {
+        show(nativePresent = false, backend = OcrBackend.LIGHTON)
+        compose.onNodeWithText("Tải LightOnOCR").performScrollTo().assertIsNotEnabled()
+        assertEquals(0, lightOnDownloads)
+    }
+
 }

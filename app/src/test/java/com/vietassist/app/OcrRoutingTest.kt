@@ -5,9 +5,9 @@ import org.junit.Test
 
 class OcrRoutingTest {
     @Test fun readingHonorsOcrSettingAndSceneDescriptionAlwaysUsesVintern() {
-        assertFalse(usesVintern(VinternEngine.Mode.READ, OcrBackend.ML_KIT))
-        assertTrue(usesVintern(VinternEngine.Mode.READ, OcrBackend.VINTERN))
-        assertTrue(usesVintern(VinternEngine.Mode.DESCRIBE, OcrBackend.ML_KIT))
-        assertTrue(usesVintern(VinternEngine.Mode.DESCRIBE, OcrBackend.VINTERN))
+        assertEquals(VisionModel.LIGHTON, localModelFor(VinternEngine.Mode.READ, OcrBackend.LIGHTON))
+        for (backend in OcrBackend.entries) assertEquals(VisionModel.VINTERN, localModelFor(VinternEngine.Mode.DESCRIBE, backend))
+        assertNull(localModelFor(VinternEngine.Mode.READ, OcrBackend.ML_KIT))
+        assertEquals(VisionModel.VINTERN, localModelFor(VinternEngine.Mode.READ, OcrBackend.VINTERN))
     }
 }

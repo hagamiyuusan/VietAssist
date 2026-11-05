@@ -33,6 +33,12 @@ fun DeviceSetupScreen(
     ttsReady: Boolean = false,
     onTestVoice: () -> Unit = {},
     onTtsSettings: () -> Unit = {},
+    lightOnReady: Boolean = false,
+    lightOnDownloading: Boolean = false,
+    lightOnProgress: Int = 0,
+    lightOnPreparation: VinternEngine.PreparationState = VinternEngine.PreparationState.NotLoaded,
+    onDownloadLightOn: () -> Unit = {},
+    onPrepareLightOn: () -> Unit = {},
     ocrBackend: OcrBackend = OcrBackend.ML_KIT,
     onOcrBackendChange: (OcrBackend) -> Unit = {},
     alwaysListening: Boolean = false,
@@ -74,6 +80,18 @@ fun DeviceSetupScreen(
             if (!cameraGranted) SetupButton("Cấp quyền camera", onCamera)
             VoiceModeSettings(alwaysListening, onVoiceModeChange)
             OcrSettingsControl(ocrBackend, onOcrBackendChange)
+            if (ocrBackend == OcrBackend.LIGHTON) {
+                SetupRequirement("LightOnOCR-3-0.8B · ${LightOnModelManager.totalBytes / 1048576} MB", when {
+                    lightOnDownloading -> "Đang tải $lightOnProgress%. Có thể tải tiếp nếu bị gián đoạn."
+                    lightOnReady -> "Đã có đủ file LightOnOCR. Vintern vẫn dùng riêng cho mô tả cảnh."
+                    else -> "Chưa tải model OCR. Dùng Wi-Fi để tải; không cần tải lại Vintern."
+                })
+                if (lightOnReady) {
+                    VinternPreparationStatus(lightOnPreparation)
+                    SetupButton("Chuẩn bị LightOnOCR", onPrepareLightOn, enabled = lightOnPreparation != VinternEngine.PreparationState.Preparing)
+                } else SetupButton("Tải LightOnOCR", onDownloadLightOn, enabled = !lightOnDownloading && requirements.hardwareBlocker == null)
+                if (lightOnDownloading) LinearProgressIndicator(progress = { lightOnProgress / 100f }, modifier = Modifier.fillMaxWidth())
+            }
             SetupRequirement("Giọng đọc tiếng Việt", ttsStatus)
             SetupButton("Nghe thử tiếng Việt", onTestVoice, enabled = ttsReady)
             TextButton(onClick = onTtsSettings, modifier = Modifier.heightIn(min = 48.dp)) {

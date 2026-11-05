@@ -20,10 +20,10 @@ data class VinternRequirements(
 ) {
     val hardwareBlocker: String?
         get() = when {
-            androidSdk < 28 -> "Vintern GPU cần Android 9 trở lên. Camera và nhận diện vật thể vẫn dùng được."
-            !is64Bit -> "Vintern cần ứng dụng chạy ở chế độ 64 bit."
-            !nativeLibraryPresent -> "Bản cài này thiếu thư viện Vintern cho máy. Hãy cài bản phù hợp."
-            !openClAvailable -> "Vintern cần driver GPU OpenCL được hãng điện thoại cung cấp. Camera và nhận diện vật thể vẫn dùng được."
+            androidSdk < 28 -> "AI trên máy cần Android 9 trở lên. Camera và nhận diện vật thể vẫn dùng được."
+            !is64Bit -> "AI trên máy cần ứng dụng chạy ở chế độ 64 bit."
+            !nativeLibraryPresent -> "Bản cài này thiếu thư viện AI cho máy. Hãy cài bản phù hợp."
+            !openClAvailable -> "AI trên máy cần driver GPU OpenCL được hãng điện thoại cung cấp. Camera và nhận diện vật thể vẫn dùng được."
             else -> null
         }
 
@@ -34,7 +34,7 @@ data class VinternRequirements(
 
     val inferenceBlocker: String?
         get() = hardwareBlocker ?: if (lowMemory) {
-            "Android đang báo thiếu RAM. Hãy đóng bớt ứng dụng rồi thử lại Vintern."
+            "Android đang báo thiếu RAM. Hãy đóng bớt ứng dụng rồi thử lại AI."
         } else null
 
     // Khuyến nghị của ứng dụng, chưa phải ngưỡng hiệu năng đã benchmark.
@@ -42,7 +42,7 @@ data class VinternRequirements(
         get() = totalRam < (4L shl 30) || availableRam < (2L shl 30)
 
     companion object {
-        fun read(context: Context): VinternRequirements {
+        fun read(context: Context, store: VisionModelStore = VinternModelManager): VinternRequirements {
             val memory = ActivityManager.MemoryInfo()
             context.getSystemService(ActivityManager::class.java).getMemoryInfo(memory)
             return VinternRequirements(
@@ -52,7 +52,7 @@ data class VinternRequirements(
                 availableRam = memory.availMem,
                 lowMemory = memory.lowMemory,
                 freeStorage = context.filesDir.usableSpace,
-                requiredStorage = VinternModelManager.requiredDownloadSpace(context),
+                requiredStorage = store.requiredDownloadSpace(context),
                 openClAvailable = OpenClRuntime.available,
                 androidSdk = Build.VERSION.SDK_INT
             )

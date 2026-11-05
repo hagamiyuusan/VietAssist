@@ -33,6 +33,8 @@ class OcrSettingsTest {
             compose.onNodeWithText("ML Kit").assertIsSelected()
             compose.onNodeWithText("Vintern").performClick().assertIsSelected()
             assertEquals(OcrBackend.VINTERN, OcrSettings(context).backend.value)
+            compose.onNodeWithText("LightOnOCR 0.8B").performClick().assertIsSelected()
+            assertEquals(OcrBackend.LIGHTON, OcrSettings(context).backend.value)
             compose.onNodeWithText("ML Kit").performClick().assertIsSelected()
             assertEquals(OcrBackend.ML_KIT, OcrSettings(context).backend.value)
         } finally { app.deleteSharedPreferences(name) }

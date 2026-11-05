@@ -12,6 +12,14 @@ import kotlinx.coroutines.withContext
 import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicLong
 
+enum class VisionModel(val label: String) {
+    VINTERN("Vintern"), LIGHTON("LightOnOCR 0.8B");
+    val files: VisionModelStore get() = when (this) {
+        VINTERN -> VinternModelManager
+        LIGHTON -> LightOnModelManager
+    }
+}
+
 /** Hàm native trong libvintern.so (app/src/main/cpp/vintern_jni.cpp). */
 internal object VinternNative {
     init {
@@ -19,7 +27,7 @@ internal object VinternNative {
     }
 
     external fun nativeInit(nativeLibDir: String, cacheDir: String)
-    external fun nativeLoad(modelPath: String, mmprojPath: String, nThreads: Int): Boolean
+    external fun nativeLoad(modelPath: String, mmprojPath: String, nThreads: Int, lightOn: Boolean): Boolean
     external fun nativeBackendName(): String
     external fun nativeWarmup(): Boolean
     external fun nativeGenerate(
@@ -34,9 +42,8 @@ internal object VinternNative {
 }
 
 /**
- * Chạy Vintern-1B-v3.5 trên máy cho hai lệnh chụp một lần:
- * mô tả xung quanh và đọc chi tiết tài liệu.
- * EfficientDet đảm nhận nhận diện vật thể liên tục; cả mô tả và đọc chữ dùng model này.
+ * Một executor sở hữu runtime và một model tại một thời điểm.
+ * Vintern mô tả cảnh; lượt OCR giữ model đã chọn khi chụp.
  */
 object VinternEngine {
     private const val TAG = "LUMORA_VINTERN"
@@ -81,16 +88,21 @@ object VinternEngine {
 
     private val mutablePreparationState = MutableStateFlow<PreparationState>(PreparationState.NotLoaded)
     val preparationState = mutablePreparationState.asStateFlow()
+    private val lightOnPreparation = MutableStateFlow<PreparationState>(PreparationState.NotLoaded)
+    private val lightOnState = lightOnPreparation.asStateFlow()
+    fun preparationFor(model: VisionModel) = if (model == VisionModel.VINTERN) preparationState else lightOnState
+    private fun stateFor(model: VisionModel) = if (model == VisionModel.VINTERN) mutablePreparationState else lightOnPreparation
+    private var loadedModel: VisionModel? = null
     @Volatile private var nativeReady = false
     @Volatile private var activeCancellation: AtomicLong? = null
 
     /** Tác vụ thuộc tiến trình ứng dụng, không bị hủy khi màn hình đóng/đổi cấu hình. */
-    fun prepare(context: Context, retry: Boolean = false): Deferred<Boolean> {
+    fun prepare(context: Context, retry: Boolean = false, model: VisionModel = VisionModel.VINTERN): Deferred<Boolean> {
         val completion = CompletableDeferred<Boolean>()
         val appContext = context.applicationContext
         executor.execute {
             try {
-                completion.complete(prepareOnWorker(appContext, retry))
+                completion.complete(prepareOnWorker(appContext, retry, model))
             } catch (error: Throwable) {
                 completion.completeExceptionally(error)
             }
@@ -99,18 +111,18 @@ object VinternEngine {
     }
 
     /** Sở hữu bitmap kể cả khi coroutine bị hủy trước lúc được chạy trên executor. */
-    suspend fun analyze(context: Context, bitmap: Bitmap, mode: Mode, cancellation: AtomicLong): Result {
+    suspend fun analyze(context: Context, bitmap: Bitmap, mode: Mode, cancellation: AtomicLong, model: VisionModel = VisionModel.VINTERN): Result {
         val request = cancellation.get()
         try {
             return withContext(dispatcher) {
                 if (request != cancellation.get()) return@withContext Result.Cancelled
-                if (VinternRequirements.read(context).inferenceBlocker != null) return@withContext Result.Failed
-                if (!VinternModelManager.isReady(context)) return@withContext Result.ModelMissing
-                if (!prepareOnWorker(context.applicationContext)) return@withContext Result.Failed
+                if (VinternRequirements.read(context, model.files).inferenceBlocker != null) return@withContext Result.Failed
+                if (!model.files.isReady(context)) return@withContext Result.ModelMissing
+                if (!prepareOnWorker(context.applicationContext, model = model)) return@withContext Result.Failed
                 if (request != cancellation.get()) return@withContext Result.Cancelled
 
                 try {
-                    val scaled = scaleToMaxSide(bitmap, mode.maxSide)
+                    val scaled = scaleToMaxSide(bitmap, if (model == VisionModel.LIGHTON) 2048 else mode.maxSide)
                     val width = scaled.width
                     val height = scaled.height
                     val rgb = try { toRgbBytes(scaled) } finally {
@@ -120,15 +132,16 @@ object VinternEngine {
                     if (request != cancellation.get()) return@withContext Result.Cancelled
                     activeCancellation = cancellation
                     val output = try {
-                        VinternNative.nativeGenerate(rgb, width, height, mode.question, mode.maxTokens)
+                        VinternNative.nativeGenerate(rgb, width, height, if (model == VisionModel.LIGHTON) "" else mode.question,
+                            if (model == VisionModel.LIGHTON) 2048 else mode.maxTokens)
                     } finally {
                         activeCancellation = null
                     }
-                    Log.i(TAG, "Chế độ $mode, ảnh ${width}x$height, mất ${System.currentTimeMillis() - startedAt} ms")
+                    Log.i(TAG, "Model ${model.name}, chế độ $mode, ảnh ${width}x$height, mất ${System.currentTimeMillis() - startedAt} ms")
                     when {
                         request != cancellation.get() -> Result.Cancelled
                         output == null -> {
-                            failPreparation("AI gặp lỗi. Hãy thử chuẩn bị AI lại.")
+                            failPreparation(model, "AI gặp lỗi. Hãy thử chuẩn bị AI lại.")
                             Result.Failed
                         }
                         else -> {
@@ -137,7 +150,7 @@ object VinternEngine {
                         }
                     }
                 } catch (error: Throwable) {
-                    failPreparation("AI gặp lỗi. Hãy thử chuẩn bị AI lại.", error)
+                    failPreparation(model, "AI gặp lỗi. Hãy thử chuẩn bị AI lại.", error)
                     Result.Failed
                 }
             }
@@ -158,19 +171,25 @@ object VinternEngine {
             try {
                 if (nativeReady) VinternNative.nativeUnload()
             } finally {
+                loadedModel = null
                 mutablePreparationState.value = PreparationState.NotLoaded
+                lightOnPreparation.value = PreparationState.NotLoaded
             }
         }
     }
 
     // Mọi đường nạp, làm nóng và giải phóng đều chạy trên cùng executor.
-    private fun prepareOnWorker(context: Context, retry: Boolean = false): Boolean {
-        if (preparationState.value == PreparationState.Ready) return true
-        if (preparationState.value is PreparationState.Failed && !retry) return false
-        val blocker = VinternRequirements.read(context).inferenceBlocker
-        if (blocker != null) return failPreparation(blocker)
-        if (!VinternModelManager.isReady(context)) return failPreparation("Chưa tải đủ mô hình AI.")
-        mutablePreparationState.value = PreparationState.Preparing
+    private fun prepareOnWorker(context: Context, retry: Boolean = false, model: VisionModel = VisionModel.VINTERN): Boolean {
+        val state = stateFor(model)
+        val store = model.files
+        if (loadedModel == model && state.value == PreparationState.Ready) return true
+        if (state.value is PreparationState.Failed && !retry) return false
+        val blocker = VinternRequirements.read(context, model.files).inferenceBlocker
+        if (blocker != null) return failPreparation(model, blocker)
+        if (!model.files.isReady(context)) return failPreparation(model, "Chưa tải đủ mô hình AI.")
+        loadedModel?.let { stateFor(it).value = PreparationState.NotLoaded }
+        loadedModel = null
+        state.value = PreparationState.Preparing
         val startedAt = android.os.SystemClock.elapsedRealtime()
         try {
             if (!nativeReady) {
@@ -179,28 +198,31 @@ object VinternEngine {
             }
             val threads = (Runtime.getRuntime().availableProcessors() / 2).coerceIn(2, 4)
             check(VinternNative.nativeLoad(
-                VinternModelManager.fileFor(context, VinternModelManager.languageModel).absolutePath,
-                VinternModelManager.fileFor(context, VinternModelManager.visionProjector).absolutePath,
-                threads
+                store.fileFor(context, store.languageModel).absolutePath,
+                store.fileFor(context, store.visionProjector).absolutePath,
+                threads, model == VisionModel.LIGHTON
             )) { "native-load-failed" }
             Log.i(TAG, "Nạp model hoàn tất trong ${android.os.SystemClock.elapsedRealtime() - startedAt} ms")
             // Chuẩn bị encoder và một bước ngôn ngữ, không chạy lại toàn bộ
             // prefill ảnh/câu hỏi của một lượt phân tích bỏ đi.
             check(VinternNative.nativeWarmup()) { "native-warmup-failed" }
-            mutablePreparationState.value = PreparationState.Ready
+            loadedModel = model
+            state.value = PreparationState.Ready
             Log.i(TAG, "Chuẩn bị AI hoàn tất trong ${android.os.SystemClock.elapsedRealtime() - startedAt} ms")
             return true
         } catch (error: Throwable) {
-            return failPreparation("Chưa chuẩn bị được AI. Hãy kiểm tra thiết bị rồi thử lại.", error)
+            return failPreparation(model, "Chưa chuẩn bị được AI. Hãy kiểm tra thiết bị rồi thử lại.", error)
         }
     }
 
-    private fun failPreparation(message: String, error: Throwable? = null): Boolean {
+    private fun failPreparation(model: VisionModel, message: String, error: Throwable? = null): Boolean {
         if (error != null) Log.e(TAG, "Chuẩn bị AI thất bại: ${error.javaClass.simpleName}")
         try {
             if (nativeReady) VinternNative.nativeUnload()
         } finally {
-            mutablePreparationState.value = PreparationState.Failed(message)
+            loadedModel?.let { stateFor(it).value = PreparationState.NotLoaded }
+            loadedModel = null
+            stateFor(model).value = PreparationState.Failed(message)
         }
         return false
     }

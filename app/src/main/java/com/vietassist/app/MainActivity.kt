@@ -189,9 +189,13 @@ fun VietAssistScreen() {
     var vinternStatus by remember { mutableStateOf("") }
     var modelReady by remember { mutableStateOf(VinternModelManager.isReady(context)) }
     val preparationState by VinternEngine.preparationState.collectAsState()
-    val aiReady = preparationState == VinternEngine.PreparationState.Ready
-    LaunchedEffect(modelReady) {
-        if (modelReady) VinternEngine.prepare(context)
+    var lightOnReady by remember { mutableStateOf(LightOnModelManager.isReady(context)) }
+    val lightOnDownload by LightOnModelManager.downloadState.collectAsState()
+    val lightOnPreparation by VinternEngine.preparationFor(VisionModel.LIGHTON).collectAsState()
+    LaunchedEffect(lightOnDownload) { if (!lightOnDownload.downloading) lightOnReady = LightOnModelManager.isReady(context) }
+    LaunchedEffect(modelReady, lightOnReady, ocrBackend) {
+        val model = if (ocrBackend == OcrBackend.LIGHTON) VisionModel.LIGHTON else VisionModel.VINTERN
+        if (model.files.isReady(context)) VinternEngine.prepare(context, model = model)
     }
     val downloadState by VinternModelManager.downloadState.collectAsState()
     val modelDownloading = downloadState.downloading
@@ -648,6 +652,7 @@ fun VietAssistScreen() {
             if (event == Lifecycle.Event.ON_RESUME) {
                 deviceRequirements = VinternRequirements.read(context)
                 modelReady = VinternModelManager.isReady(context)
+                lightOnReady = LightOnModelManager.isReady(context)
                 hasPermission = ContextCompat.checkSelfPermission(context, Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED
                 micPermissionGranted = ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED
             }
@@ -659,14 +664,19 @@ fun VietAssistScreen() {
         while (showDeviceSetup) {
             deviceRequirements = VinternRequirements.read(context)
             modelReady = VinternModelManager.isReady(context)
+            lightOnReady = LightOnModelManager.isReady(context)
             kotlinx.coroutines.delay(2000)
         }
     }
 
     val modelSizeText = "khoảng ${VinternModelManager.totalBytes / (1024 * 1024)} megabyte"
 
-    fun startModelDownload() {
-        deviceRequirements = VinternRequirements.read(context)
+    fun startModelDownload(model: VisionModel = localModelFor(VinternEngine.Mode.READ, ocrSettings.backend.value) ?: VisionModel.VINTERN) {
+        val store = model.files
+        val ready = store.isReady(context)
+        val state = VinternEngine.preparationFor(model).value
+        val download = store.downloadState.value
+        deviceRequirements = VinternRequirements.read(context, store)
         val blocked = deviceRequirements.downloadBlocker
         if (blocked != null) {
             vinternStatus = blocked
@@ -674,9 +684,9 @@ fun VietAssistScreen() {
             speakMessage(blocked, TextToSpeech.QUEUE_FLUSH, null, "lumora_requirements")
             return
         }
-        if (modelReady) {
+        if (ready) {
             speakMessage(
-                when (val state = preparationState) {
+                when (state) {
                     VinternEngine.PreparationState.Ready -> "AI đã sẵn sàng. Bạn có thể nói mô tả xung quanh hoặc đọc chi tiết."
                     is VinternEngine.PreparationState.Failed -> state.message
                     else -> "Mô hình đã tải xong. AI đang chuẩn bị; bạn vẫn có thể dùng OCR ML Kit trong Thiết lập."
@@ -687,9 +697,9 @@ fun VietAssistScreen() {
             )
             return
         }
-        if (modelDownloading || modelDownloadJob?.isActive == true) {
+        if (download.downloading || modelDownloadJob?.isActive == true) {
             speakMessage(
-                "Đang tải mô hình AI, đã được $modelDownloadPercent phần trăm.",
+                "Đang tải mô hình AI, đã được ${download.percent} phần trăm.",
                 TextToSpeech.QUEUE_FLUSH,
                 null,
                 "lumora_model_progress"
@@ -698,7 +708,7 @@ fun VietAssistScreen() {
         }
         vinternStatus = ""
         speakMessage(
-            "Bắt đầu tải mô hình AI, $modelSizeText. Nên dùng Wi-Fi. Tôi sẽ báo khi tải xong.",
+            "Bắt đầu tải ${model.label}, ${store.totalBytes / 1048576} megabyte. Nên dùng Wi-Fi. Tôi sẽ báo khi tải xong.",
             TextToSpeech.QUEUE_FLUSH,
             null,
             "lumora_model_download"
@@ -707,7 +717,7 @@ fun VietAssistScreen() {
         modelDownloadJob = coroutineScope.launch {
             val succeeded = withContext(Dispatchers.IO) {
                 try {
-                    VinternModelManager.download(context) { }
+                    store.download(context) { }
                     true
                 } catch (error: Exception) {
                     Log.e("LUMORA_VINTERN", "Tải mô hình thất bại", error)
@@ -716,9 +726,10 @@ fun VietAssistScreen() {
             }
             if (downloadGeneration.get() != generation) return@launch
             modelReady = VinternModelManager.isReady(context)
-            if (succeeded && modelReady) {
+            lightOnReady = LightOnModelManager.isReady(context)
+            if (succeeded && store.isReady(context)) {
                 vinternStatus = "Đã tải xong. Đang chuẩn bị AI…"
-                VinternEngine.prepare(context, retry = true)
+                VinternEngine.prepare(context, retry = true, model = model)
                 speakMessage(
                     "Đã tải xong mô hình. Tôi đang chuẩn bị AI; OCR bằng ML Kit vẫn dùng được.",
                     TextToSpeech.QUEUE_FLUSH,
@@ -738,9 +749,9 @@ fun VietAssistScreen() {
     }
 
     fun requestCapture(mode: VinternEngine.Mode) {
-        val useVintern = usesVintern(mode, ocrSettings.backend.value)
-        if (useVintern) {
-            deviceRequirements = VinternRequirements.read(context)
+        val model = localModelFor(mode, ocrSettings.backend.value)
+        if (model != null) {
+            deviceRequirements = VinternRequirements.read(context, model.files)
             val blocked = deviceRequirements.inferenceBlocker
             if (blocked != null) {
                 vinternStatus = blocked
@@ -748,7 +759,7 @@ fun VietAssistScreen() {
                 speakMessage(blocked, TextToSpeech.QUEUE_FLUSH, null, "lumora_requirements")
                 return
             }
-            if (!modelReady) {
+            if (!model.files.isReady(context)) {
                 showDeviceSetup = true
                 speakMessage(
                     "Chức năng này cần mô hình AI $modelSizeText. Hãy nói tải mô hình khi có Wi-Fi.",
@@ -758,15 +769,8 @@ fun VietAssistScreen() {
                 )
                 return
             }
-            if (!aiReady) {
-                speakMessage(
-                    if (preparationState is VinternEngine.PreparationState.Failed)
-                        "AI chưa sẵn sàng. Hãy chọn thử chuẩn bị AI lại; bạn vẫn có thể dùng OCR ML Kit trong Thiết lập."
-                    else "AI đang chuẩn bị. Bạn vẫn có thể đọc bằng OCR ML Kit nếu đã chọn trong Thiết lập.",
-                    TextToSpeech.QUEUE_FLUSH, null, "lumora_ai_preparing"
-                )
-                return
-            }
+            // Analyze prepares the requested model on the shared executor.
+            // Switching OCR/description must not be blocked by the other model's state.
         }
         if (vinternBusy) {
             speakMessage(
@@ -839,9 +843,9 @@ fun VietAssistScreen() {
         val mode = vinternMode
         val backend = capturedOcrBackend
         coroutineScope.launch {
-            val result = if (!usesVintern(mode, backend))
-                MlKitOcr.read(frame)
-            else VinternEngine.analyze(context, frame, mode, vinternCancellation)
+            val model = localModelFor(mode, backend)
+            val result = if (model == null) MlKitOcr.read(frame)
+            else VinternEngine.analyze(context, frame, mode, vinternCancellation, model)
             if (vinternRun.get() != request) return@launch
             vinternBusy = false
             if (vinternCancelled) {
@@ -869,7 +873,8 @@ fun VietAssistScreen() {
                 }
                 VinternEngine.Result.ModelMissing -> {
                     vinternStatus = "Chưa có mô hình AI. Hãy mở thiết lập để tải."
-                    modelReady = false
+                    modelReady = VinternModelManager.isReady(context)
+                    lightOnReady = LightOnModelManager.isReady(context)
                     speakMessage(
                         "Không tìm thấy mô hình AI. Hãy nói tải mô hình.",
                         TextToSpeech.QUEUE_FLUSH,
@@ -878,7 +883,7 @@ fun VietAssistScreen() {
                     )
                 }
                 VinternEngine.Result.Failed -> {
-                    vinternStatus = if (usesVintern(mode, backend)) "AI chưa phân tích được ảnh. Hãy thử lại hoặc kiểm tra Thiết lập."
+                    vinternStatus = if (localModelFor(mode, backend) != null) "AI chưa phân tích được ảnh. Hãy thử lại hoặc kiểm tra Thiết lập."
                         else "OCR ML Kit chưa đọc được ảnh. Hãy giữ máy yên, đủ sáng rồi nói chụp lại."
                     speakMessage(
                         vinternStatus,
@@ -1073,6 +1078,12 @@ fun VietAssistScreen() {
                 try { context.startActivity(Intent("com.android.settings.TTS_SETTINGS")) }
                 catch (_: android.content.ActivityNotFoundException) { showVoiceNotice("Máy không mở được cài đặt giọng đọc. Hãy mở trong Cài đặt hệ thống.") }
             },
+            lightOnReady = lightOnReady,
+            lightOnDownloading = lightOnDownload.downloading,
+            lightOnProgress = lightOnDownload.percent,
+            lightOnPreparation = lightOnPreparation,
+            onDownloadLightOn = { startModelDownload(VisionModel.LIGHTON) },
+            onPrepareLightOn = { VinternEngine.prepare(context, retry = true, model = VisionModel.LIGHTON) },
             ocrBackend = ocrBackend,
             onOcrBackendChange = ocrSettings::select,
             alwaysListening = alwaysListening,
@@ -1089,7 +1100,7 @@ fun VietAssistScreen() {
                 context.startActivity(Intent(android.provider.Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
                     android.net.Uri.parse("package:${context.packageName}")))
             },
-            onDownload = { startModelDownload() },
+            onDownload = { startModelDownload(VisionModel.VINTERN) },
             onRefresh = {
                 deviceRequirements = VinternRequirements.read(context)
                 modelReady = VinternModelManager.isReady(context)
@@ -1342,7 +1353,11 @@ fun VietAssistScreen() {
                 }
             }
 
-            if (modelReady && !vinternBusy && !aiReady) VinternPreparationStatus(preparationState)
+            if (modelReady && !vinternBusy && preparationState == VinternEngine.PreparationState.Preparing)
+                VinternPreparationStatus(preparationState)
+            if (ocrBackend == OcrBackend.LIGHTON && lightOnReady && !vinternBusy && lightOnPreparation == VinternEngine.PreparationState.Preparing) {
+                Text("Đang chuẩn bị LightOnOCR…", color = accentGreen)
+            }
 
             Text(
                 "Đọc chữ: nói “đọc văn bản” · OCR: ${ocrBackend.label}",
@@ -1354,11 +1369,10 @@ fun VietAssistScreen() {
                         !modelReady -> { showDeviceSetup = true }
                         preparationState is VinternEngine.PreparationState.Failed ->
                             VinternEngine.prepare(context, retry = true)
-                        aiReady -> requestCapture(VinternEngine.Mode.DESCRIBE)
+                        else -> requestCapture(VinternEngine.Mode.DESCRIBE)
                     }
                 },
-                enabled = !vinternBusy && !modelDownloading &&
-                    (!modelReady || aiReady || preparationState is VinternEngine.PreparationState.Failed),
+                enabled = !vinternBusy && !modelDownloading,
                 modifier = Modifier
                     .fillMaxWidth()
                     .heightIn(min = 58.dp),
@@ -1374,7 +1388,7 @@ fun VietAssistScreen() {
                         !modelReady -> "BẬT MÔ TẢ CHI TIẾT"
                         vinternBusy -> "AI ĐANG PHÂN TÍCH..."
                         preparationState is VinternEngine.PreparationState.Failed -> "THỬ CHUẨN BỊ AI LẠI"
-                        !aiReady -> "ĐANG CHUẨN BỊ AI…"
+                        preparationState == VinternEngine.PreparationState.Preparing -> "ĐANG CHUẨN BỊ AI…"
                         else -> "CHỤP · MÔ TẢ XUNG QUANH"
                     },
                     fontSize = 16.sp

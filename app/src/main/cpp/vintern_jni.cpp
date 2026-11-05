@@ -1,4 +1,4 @@
-// Cầu nối JNI giữa LUMORA và llama.cpp/libmtmd để chạy Vintern-1B-v3.5 trên máy.
+// Shared JNI owner for Vintern scene description and LightOnOCR transcription.
 // GPU OpenCL mã hóa ảnh; trên Adreno 735, CPU sinh văn bản nhanh hơn GPU.
 // Kotlin bảo đảm chỉ một luồng gọi vào đây.
 
@@ -40,6 +40,8 @@ llama_model   * g_model = nullptr;
 llama_context * g_lctx  = nullptr;
 mtmd_context  * g_mctx  = nullptr;
 std::string g_backend_name;
+bool g_lighton = false;
+int g_context_size = N_CTX;
 
 // Các file GGUF Vintern hiện có không khai báo tokenizer.ggml.eos_token_id, nên
 // llama.cpp lấy mặc định id 11 (dấu phẩy trong từ vựng Qwen) làm token kết thúc
@@ -56,6 +58,7 @@ llama_token single_special_token(const llama_vocab * vocab, const char * text) {
 }
 
 bool is_stop_token(const llama_vocab * vocab, llama_token token) {
+    if (g_lighton) return llama_vocab_is_eog(vocab, token);
     if (g_im_end == LLAMA_TOKEN_NULL && g_endoftext == LLAMA_TOKEN_NULL) {
         return llama_vocab_is_eog(vocab, token);
     }
@@ -113,9 +116,11 @@ Java_com_vietassist_app_VinternNative_nativeInit(JNIEnv * env, jobject, jstring 
 
 extern "C" JNIEXPORT jboolean JNICALL
 Java_com_vietassist_app_VinternNative_nativeLoad(
-        JNIEnv * env, jobject, jstring model_path, jstring mmproj_path, jint n_threads) {
+        JNIEnv * env, jobject, jstring model_path, jstring mmproj_path, jint n_threads, jboolean light_on) {
     std::lock_guard<std::mutex> lock(g_mutex);
     free_all();
+    g_lighton = light_on == JNI_TRUE;
+    g_context_size = g_lighton ? 8192 : N_CTX;
     try {
 
         const std::string model_file  = to_std_string(env, model_path);
@@ -154,7 +159,7 @@ Java_com_vietassist_app_VinternNative_nativeLoad(
         LOGI("Token kết thúc: <|im_end|>=%d, <|endoftext|>=%d", g_im_end, g_endoftext);
 
         llama_context_params ctx_params = llama_context_default_params();
-        ctx_params.n_ctx           = N_CTX;
+        ctx_params.n_ctx           = g_context_size;
         ctx_params.n_batch         = N_BATCH;
         ctx_params.n_threads       = n_threads;
         ctx_params.n_threads_batch = n_threads;
@@ -174,6 +179,7 @@ Java_com_vietassist_app_VinternNative_nativeLoad(
         mtmd_params.n_threads     = n_threads;
         mtmd_params.print_timings = true;
         mtmd_params.warmup        = false;
+        if (g_lighton) mtmd_params.image_max_tokens = 4096;
         g_mctx = mtmd_init_from_file(mmproj_file.c_str(), g_model, mtmd_params);
         if (!g_mctx || !mtmd_support_vision(g_mctx)) {
             LOGE("Không tải được bộ mã hóa ảnh: %s", mmproj_file.c_str());
@@ -246,7 +252,7 @@ Java_com_vietassist_app_VinternNative_nativeGenerate(
     try {
         g_cancel.store(false);
         if (!g_model || !g_lctx || !g_mctx) {
-            LOGE("Vintern chưa được tải");
+            LOGE("Model AI chưa được tải");
             return nullptr;
         }
 
@@ -266,11 +272,18 @@ Java_com_vietassist_app_VinternNative_nativeGenerate(
         // Mỗi câu hỏi là một lượt độc lập; không giữ lịch sử hội thoại.
         llama_memory_clear(llama_get_memory(g_lctx), true);
 
-        const std::string prompt =
+        const std::string vintern_prompt =
                 std::string("<|im_start|>system\n") + SYSTEM_PROMPT + "<|im_end|>\n" +
                 "<|im_start|>user\n" + mtmd_default_marker() + "\n" +
                 to_std_string(env, question) + "<|im_end|>\n" +
                 "<|im_start|>assistant\n";
+
+        // Official LightOnOCR-3 transcription: image-only user turn, no system prompt,
+        // Qwen3.5 thinking disabled. Vision boundary tokens come from libmtmd.
+        const std::string prompt = g_lighton
+            ? std::string("<|im_start|>user\n") + mtmd_default_marker() +
+              "<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n"
+            : vintern_prompt;
 
         mtmd_input_text text;
         text.text          = prompt.c_str();
@@ -304,14 +317,14 @@ Java_com_vietassist_app_VinternNative_nativeGenerate(
                 llama_sampler_chain_init(llama_sampler_chain_default_params()), llama_sampler_free);
         // Giải mã tham lam (giống do_sample=False của model card) kèm phạt lặp nhẹ,
         // vì mô hình nhỏ dễ lặp lại một cụm từ khi đọc văn bản dài.
-        llama_sampler_chain_add(sampler.get(), llama_sampler_init_penalties(
+        if (!g_lighton) llama_sampler_chain_add(sampler.get(), llama_sampler_init_penalties(
                 llama_vocab_n_tokens(vocab), 64, 1.15f, 0.0f, 0.0f));
         llama_sampler_chain_add(sampler.get(), llama_sampler_init_greedy());
 
         std::string output;
         bool ok = true;
         char piece[256];
-        for (int i = 0; i < max_tokens && n_past < N_CTX; ++i) {
+        for (int i = 0; i < max_tokens && n_past < g_context_size; ++i) {
             if (g_cancel.load()) {
                 LOGW("Đã hủy sinh văn bản");
                 ok = false;
@@ -326,7 +339,7 @@ Java_com_vietassist_app_VinternNative_nativeGenerate(
             llama_batch batch = llama_batch_get_one(&token, 1);
             if (llama_decode(g_lctx, batch) != 0) {
                 LOGE("llama_decode lỗi ở token thứ %d", i);
-                break;
+                return nullptr;
             }
             ++n_past;
         }
@@ -335,7 +348,7 @@ Java_com_vietassist_app_VinternNative_nativeGenerate(
         LOGI("Vintern trả lời %zu byte", output.size());
         return to_byte_array(env, output);
     } catch (const std::exception &) {
-        env->ThrowNew(env->FindClass("java/lang/IllegalStateException"), "Vintern chưa xử lý được ảnh");
+        env->ThrowNew(env->FindClass("java/lang/IllegalStateException"), "AI chưa xử lý được ảnh");
         return nullptr;
     }
 }
